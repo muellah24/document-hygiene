@@ -8,14 +8,32 @@ A Claude Code skill + hook pair that stops long-lived AI-written documents (plan
 
 Explainer video: [`docs/document-hygiene-promo.mp4`](docs/document-hygiene-promo.mp4)
 
-## The problem
+## Why this exists
 
-Every turn on a long-lived doc patches the immediate ask and leaves the old text in place. Over days or weeks that produces:
-- stale claims that were true when written but aren't anymore
-- self-contradictions (two sections disagree, reader can't tell which is current)
-- changelog narration baked into the body ("corrected", "reversed 2026-...", "earlier draft said...") instead of living in version control where it belongs
+Short-lived docs don't drift — you write them once and move on. The ones that rot are the docs a project leans on for weeks: the spec, the plan, the architecture note, the README. Those get edited over and over.
 
-Patching is not reconciling. This tool forces the reconciliation pass.
+When an AI agent edits a long doc, it does the economical thing: it rewrites the span the current task touches and leaves the rest alone. That's right for the immediate ask and wrong for the document — the model is patching the paragraph in front of it, not re-reading all 400 lines and reconciling them against reality. Do that fifty times and the doc becomes a sediment of half-updated truths.
+
+### How the scars accumulate
+
+Each project change lands as a *patch*, not a *rewrite*:
+
+- **A decision reverses.** You switch Postgres → DynamoDB in week three. "Data model" gets updated; "Overview" still says Postgres. Two sections disagree, nobody flags it.
+- **Something ships.** The plan still says *"Phase 3 — blocked on the auth migration"* two weeks after that migration merged.
+- **A thing gets renamed.** The install step calls `setup.sh`; the script is now `bootstrap.sh`. It wasn't wrong when written — the world moved.
+- **The edits narrate themselves.** The doc accumulates its own diff — *"corrected the endpoint (was /v1, now /v2)"*, *"earlier draft said 4 workers, now 8"* — burying the current answer under the story of how it changed.
+
+Each was a locally-correct edit. Drift is what you get when they're never reconciled globally — and AI makes them fast and in volume, so it builds far quicker than in a human-only doc.
+
+### Why it's worth pruning
+
+A drifted doc is worse than no doc, because people and agents still trust it:
+
+- **It stops being usable.** One contradiction and the reader stops trusting the whole file, then re-verifies everything against the code — the work the doc was meant to save.
+- **Agents inherit the lies.** The next AI session reads a stale *"we use Postgres"* as context and writes Postgres code. Wrong context in, wrong work out — now the error is in the codebase.
+- **Drift compounds.** New edits are made against a half-wrong picture, so the longer it's left, the more expensive the untangle — until the doc gets abandoned and rewritten from scratch.
+
+Patching is not reconciling. This tool watches the sediment build up and forces a reconciliation pass — re-read the whole thing, re-verify every claim, fix both sides of each contradiction, strip the changelog scars — so the doc reads as one clean statement of what's true *now*.
 
 ## How it works
 
