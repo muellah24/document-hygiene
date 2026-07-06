@@ -1,3 +1,5 @@
+<!-- hygiene: ignore --><!-- this README documents the hygiene tool's own trigger vocabulary (corrected/reversed/TODO/etc.) as subject matter, not as drift in the doc itself -->
+
 # Document Hygiene
 
 A Claude Code skill + hook pair that stops long-lived AI-written documents (plans, specs, reports, READMEs) from drifting: it catches stale claims, self-contradictions, and changelog scar tissue, and forces a clean rewrite before you ship the doc.
@@ -27,7 +29,13 @@ Three pieces, all Claude Code native (no external service):
 
 - **Opt-out**: a doc can exempt itself with an inline `<!-- hygiene: ignore -->` marker in its first 25 lines (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`), or via glob patterns in `.claude/.hygiene/ignore` (one per line, gitignore-style). Use this for audit logs, fact-check docs, or specs where words like "corrected" are the subject matter, not drift.
 - **Attribution**: hygiene state lives under `.claude/.hygiene/sessions/<session_id>/`, so in a folder touched by multiple agents (or Claude + Codex), a reminder only ever lists docs *that session* edited.
-- **Authorship stamp convention** (optional, recommended for shared docs): when substantially editing a doc other agents may also touch, prepend an HTML-comment authorship block — see the SKILL.md source repo this was extracted from for the exact format. The tracker skips this block when scanning for scars, so it's safe to leave in place.
+- **Authorship stamp convention** (optional, recommended for shared docs): when substantially editing a doc other agents may also touch, prepend an HTML-comment authorship block at the top of the file, e.g.:
+  ```
+  <!-- authors (newest first):
+  - Claude Opus 4.8 · effort high · 2026-07-02 · drafted sections 1-4
+  -->
+  ```
+  The tracker strips this block before scanning for scars, so it's safe to leave in place — it won't trigger false-positive drift warnings.
 
 ## Install
 
