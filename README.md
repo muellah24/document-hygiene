@@ -28,7 +28,8 @@ Three pieces, all Claude Code native (no external service):
 ### Multi-agent / shared-folder safety
 
 - **Opt-out**: a doc can exempt itself with an inline `<!-- hygiene: ignore -->` marker in its first 25 lines (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`), or via glob patterns in `.claude/.hygiene/ignore` (one per line, gitignore-style). Use this for audit logs, fact-check docs, or specs where words like "corrected" are the subject matter, not drift.
-- **Attribution**: hygiene state lives under `.claude/.hygiene/sessions/<session_id>/`, so in a folder touched by multiple agents (or Claude + Codex), a reminder only ever lists docs *that session* edited.
+- **Attribution**: runtime state is namespaced per Claude `session_id`, so in a folder touched by multiple agents (or Claude + Codex), a reminder only ever lists docs *that session* edited. State lives outside the repo — under `~/.claude/document-hygiene/state/<project-hash>/sessions/<session_id>/`, keyed by a hash of the project directory — so ordinary markdown edits never create untracked bookkeeping files inside your project. The only project-local file is the optional user-authored `.claude/.hygiene/ignore` config, which is safe to commit.
+- **Hardening**: `session_id` is used to build a directory path that the Stop hook deletes with `rm -rf`, so both hooks sanitize it against a strict allowlist (rejecting path separators and `..`), and the Stop hook additionally refuses to delete anything outside its own `sessions/` root. A malformed or adversarial `session_id` falls back to a fixed `shared` bucket instead of escaping the state directory.
 - **Authorship stamp convention** (optional, recommended for shared docs): when substantially editing a doc other agents may also touch, prepend an HTML-comment authorship block at the top of the file, e.g.:
   ```
   <!-- authors (newest first):
@@ -77,3 +78,4 @@ Nothing to invoke manually most of the time — the `Stop` hook reminds you auto
 
 - Claude Code with hooks support.
 - `jq` and `bash` (both hook scripts depend on `jq` for parsing the hook JSON payload).
+- `shasum` or `sha1sum` (used to key runtime state by project directory; `shasum` ships with macOS, `sha1sum` with most Linux distros). If neither is present the hooks fall back to a single shared state bucket.

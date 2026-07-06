@@ -4,13 +4,26 @@
 # reminded solely about docs IT edited — never a concurrent agent's work.
 # Non-blocking: emits additionalContext only (never decision:block) and resets
 # its own bucket after firing, so it cannot recurse.
+#
+# Runtime state is read from ~/.claude/document-hygiene/state/<project-hash>/,
+# matching track-doc-edits.sh (kept out of the repo being edited).
 
 INPUT=$(cat 2>/dev/null)
-BASE="${CLAUDE_PROJECT_DIR:-$PWD}/.claude/.hygiene"
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
+PROJHASH=$(printf '%s' "$PROJECT_DIR" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -c1-16)
+[ -z "$PROJHASH" ] && PROJHASH="default"
+BASE="${HOME}/.claude/document-hygiene/state/$PROJHASH"
 [ -d "$BASE" ] || exit 0
 
 SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "shared"' 2>/dev/null)
-[ -z "$SID" ] && SID="shared"
+# Sanitize: SID is used to build a path that gets rm -rf'd below. Reject path
+# separators and traversal; fall back to the fixed bucket. Must match the
+# allowlist in track-doc-edits.sh.
+case "$SID" in
+  ''|.|..) SID="shared" ;;
+  *[!A-Za-z0-9._-]*) SID="shared" ;;
+  *..*) SID="shared" ;;
+esac
 DIR="$BASE/sessions/$SID"
 
 # Opportunistic cleanup: prune session buckets untouched for 3+ days so the
@@ -34,7 +47,11 @@ if [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; then
   msg="${msg} These are only docs YOU edited this session. Skip any doc you did not author this session or that carries a 'hygiene: ignore' marker (another agent may own it). Otherwise run the document-hygiene skill on the rest: fact-check every claim against current evidence, delete stale/contradicted statements and changelog narration, and ensure each doc reads as a clean current version."
 
   # Reset this session's cycle BEFORE emitting (prevents any Stop-hook recursion).
-  rm -rf "$DIR" 2>/dev/null
+  # Defense in depth: never rm -rf outside the sessions root, even if SID
+  # sanitization is ever bypassed.
+  case "$DIR" in
+    "$BASE/sessions/"?*) rm -rf "$DIR" 2>/dev/null ;;
+  esac
 
   jq -cn --arg ctx "$msg" '{hookSpecificOutput:{hookEventName:"Stop",additionalContext:$ctx}}' 2>/dev/null
 fi
