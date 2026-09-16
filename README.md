@@ -93,10 +93,11 @@ Pick `apply` for solo work, where reviewing every proposal is pure overhead. Kee
 
 This tool stores no document content anywhere, not even temporarily: no backup, no versioning, nothing under `~/.claude` beyond edit counts and file paths. Recovery relies entirely on your own git history.
 
-"Git" here means the local save-history inside your project folder (the hidden `.git` directory), not GitHub. Every commit is a snapshot kept on your own disk, and the undo below reads from that snapshot. GitHub is not involved: nothing is pushed, fetched, or read from any server. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit, shell-quoted so it can be pasted and run as-is even when the repo path or file name contains spaces:
+"Git" here means the local save-history inside your project folder (the hidden `.git` directory), not GitHub. Every commit is a snapshot kept on your own disk, and the undo below reads from that snapshot. GitHub is not involved: nothing is pushed, fetched, or read from any server. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean and record the exact command that undoes the edit, shell-quoted so it can be pasted and run as-is even when the repo path or file name contains spaces:
 ```
 restore: git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>
 ```
+You see only a three-word confirmation before the edit, `Undo ready (git).`; Claude prints the full command if the pass goes wrong or if you ask how to undo.
 A doc that isn't safe to auto-edit is named with the specific reason instead, and handled in propose mode (reviewed and accepted by hand) even though the session mode is apply:
 - `<doc>: not in a git repository, propose only` (the folder itself isn't a git repo). Apply mode is unavailable here until you enable it: a one-time `git init`, adding the docs, and a commit is all it takes, and you can ask Claude to do that for you (Claude will ask before running `git init`, since creating a `.git` directory in a folder you didn't ask about, like a Dropbox or Drive folder, is a visible change). The reminder adds this same one-line offer, once, whenever this reason applies to any doc.
 - `<doc>: never committed, propose only` (the folder is a git repo, but this doc was never added and committed).

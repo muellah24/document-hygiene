@@ -82,11 +82,11 @@ printf '%s\n' "$MODE"
 2. It is a tracked regular file, not a symlink: `git ls-files --error-unmatch -- "$f"` and `test -L "$f"` (must fail, i.e. not a symlink).
 3. It has no staged or unstaged changes for that path: `git status --porcelain -- "$f"` prints nothing.
 
-If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relative path, and state the exact restore command *before* the first edit, in this form:
+If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relative path, and keep the exact restore command ready, in this form, shell-quoted (e.g. with bash's `printf '%q'`) so it can be pasted and run as-is even when a path contains spaces:
 ```
 git -C <root> restore --source=<sha> --worktree -- <relative-path>
 ```
-The command must be shell-quoted (e.g. with bash's `printf '%q'`) so a root or relative path containing spaces or other shell metacharacters can still be pasted and run as-is. When the pass was triggered by the Stop-hook reminder in apply mode, the reminder already lists this command per doc, already quoted; reuse it rather than recomputing.
+Do not print the command to the user up front. Before the first edit, tell them in three words that the undo exists: `Undo ready (git).` Print the full command only if the pass goes wrong (an edit you could not complete or verify) or if the user asks how to undo. When the pass was triggered by the Stop-hook reminder in apply mode, the reminder already carries this command per doc, already quoted; reuse it rather than recomputing.
 
 If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line, naming the specific reason (not in a git repository, never committed, has uncommitted changes, is a symlink, or git not installed). When the reason is "not in a git repository", say so and OFFER to initialize git for the folder (one time: `git init`, add the docs, commit); never run `git init` unasked, because creating a `.git` directory in someone's folder (Dropbox, Drive, a shared folder) is a visible change they must approve. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
 

@@ -49,10 +49,11 @@ Resolve the project root consistently: prefer an explicit project-root environme
 2. It is a tracked regular file, not a symlink: `git ls-files --error-unmatch -- "$f"` and `test -L "$f"` (must fail, i.e. not a symlink).
 3. It has no staged or unstaged changes for that path: `git status --porcelain -- "$f"` prints nothing.
 
-If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relative path, and state the exact restore command *before* the first edit, shell-quoted so it can be pasted and run as-is even when the path contains spaces:
+If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relative path, and keep the exact restore command ready, shell-quoted so it can be pasted and run as-is even when the path contains spaces:
 ```
 git -C <root> restore --source=<sha> --worktree -- <relative-path>
 ```
+Do not print it up front. Before the first edit, tell the user in three words that the undo exists: `Undo ready (git).` Print the full command only if the pass goes wrong or the user asks how to undo.
 
 If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line, naming the specific reason: not in a git repository, never committed, has uncommitted changes, is a symlink, or git not installed. When the reason is "not in a git repository", say so and offer to initialize git for the folder (one time: `git init`, add the docs, commit); never run `git init` unasked, because creating a `.git` directory in someone's folder (a synced or shared folder, for instance) is a visible change they must approve. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
 
