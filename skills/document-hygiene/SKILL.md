@@ -1,6 +1,14 @@
 ---
 name: document-hygiene
-description: Use when maintaining a long-lived document, plan, spec, report, README, or any artifact edited across multiple turns or days: to fact-check it against current evidence, remove stale or contradicted claims, and strip accumulated changelog/correction narration so it reads as a clean current version. Trigger on "clean up this doc", "is this still accurate", "remove the correction scars", a doc edited many times, after reversing/correcting any earlier claim, or when the automatic Stop-hook hygiene reminder fires.
+description: >-
+  Use when maintaining a long-lived document, plan, spec, report, README, or
+  any artifact edited across multiple turns or days: to fact-check it against
+  current evidence, remove stale or contradicted claims, and strip
+  accumulated changelog/correction narration so it reads as a clean current
+  version. Trigger on "clean up this doc", "is this still accurate", "remove
+  the correction scars", a doc edited many times, after
+  reversing/correcting any earlier claim, or when the automatic Stop-hook
+  hygiene reminder fires.
 ---
 
 <!-- hygiene: ignore --><!-- this skill documents the hygiene tool's own trigger vocabulary (corrected/reversed/TODO/etc.) as subject matter, not as drift in the doc itself -->
@@ -27,18 +35,57 @@ Run this before touching any text.
 3. `~/.claude/document-hygiene/mode` (global file, same format).
 4. Default: `propose`.
 
-Check it with a shell command, e.g.:
+Once a source is selected (the env var is set, or the project file exists, or the global file exists, in that order), an empty or malformed value there resolves to `propose` directly: it never falls through to a lower-priority source. Resolve the project root the same way the hooks do, so running this from a subdirectory never disagrees with them:
+
+<!-- MODE_SNIPPET_START -->
+```bash
+ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+if [ -n "${DOCUMENT_HYGIENE_MODE:-}" ]; then
+  RAW="$DOCUMENT_HYGIENE_MODE"
+elif [ -f "$ROOT/.claude/.hygiene/mode" ]; then
+  RAW=$(cat "$ROOT/.claude/.hygiene/mode" 2>/dev/null)
+elif [ -f "$HOME/.claude/document-hygiene/mode" ]; then
+  RAW=$(cat "$HOME/.claude/document-hygiene/mode" 2>/dev/null)
+else
+  RAW=""
+fi
+# Trim only leading/trailing whitespace, never interior: a corrupted
+# "ap<newline>ply" must not silently become "apply".
+TRIMMED=$(printf '%s' "$RAW" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+case "$TRIMMED" in
+  apply) MODE=apply ;;
+  *) MODE=propose ;;
+esac
+printf '%s\n' "$MODE"
 ```
-echo "${DOCUMENT_HYGIENE_MODE:-$(cat .claude/.hygiene/mode 2>/dev/null || cat ~/.claude/document-hygiene/mode 2>/dev/null || echo propose)}"
-```
+<!-- MODE_SNIPPET_END -->
+
 - **propose** (default): re-read and re-verify as usual, but do not edit the doc. Present a compact list of proposed changes (for each: current text, proposed text, and the evidence behind the change) and wait for the user to accept before applying anything.
 - **apply**: edit directly. Stay silent afterward unless something changes what the user must do (see step 9).
 
 **(b) Skip exempt docs.** Skip any doc carrying a `hygiene: ignore`-style marker in its first 25 lines, or matching a glob in `<project>/.claude/.hygiene/ignore`. These are opted out deliberately (shared docs, audit logs, specs where "corrected" is the subject matter).
 
-**(c) Scope to what you own.** Only reconcile docs you authored or substantially edited in this session, unless the user explicitly asked you to clean a specific doc. For anything else, propose rather than apply, regardless of mode: another agent or the user may own that doc's current state.
+**(c) Scope to what you own.** Automatic reconciliation (apply mode) is allowed only for docs you created in this session. For any pre-existing doc, apply-mode edits happen only when the user explicitly asked you, by name, to clean that doc; otherwise propose rather than apply, regardless of mode: another agent or the user may own that doc's current state.
+
+**Bounded edits.** Whether proposing or applying:
+- Re-read the doc immediately before editing it; do not trust an earlier read from this session.
+- Make localized edits with the exact expected old text (the Edit tool's `old_string`) so a changed preimage fails the edit instead of silently overwriting another agent's work. Never replace a whole pre-existing file with `Write`.
+- Every edit must be backed by a specific piece of evidence gathered in this pass. When the evidence is ambiguous, leave the text alone and propose instead of guessing.
+- Before declaring done, review the diff (`git diff -- <doc>` when the doc is in a git work tree) and confirm no section heading disappeared unintentionally.
+- The Stop hook does not run on user interruption, so a pass must never leave a doc half-edited across turns: finish or revert each doc within the same turn.
 
 **(d) A vocabulary match is a lead, not a verdict.** Finding "corrected", "TODO", or a date in a doc is a review candidate, never proof the text should be deleted. Remove the narration about the edit; keep the decision itself, its rationale, research observations, quotes, and creative intent. "We corrected the launch date to March 3" narrates an edit, so strip it. "We're launching March 3 because retail partners need six weeks lead time" is a decision with its rationale, so keep it.
+
+**(e) Recovery baseline (apply mode only).** This tool stores no document content anywhere, not even temporarily: git is the only undo. Before editing a doc in apply mode, confirm all three with shell commands you run yourself:
+1. The doc is inside a git work tree: `git -C "$(dirname "$f")" rev-parse --show-toplevel`.
+2. It is a tracked regular file, not a symlink: `git ls-files --error-unmatch -- "$f"` and `test -L "$f"` (must fail, i.e. not a symlink).
+3. It has no staged or unstaged changes for that path: `git status --porcelain -- "$f"` prints nothing.
+
+If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relative path, and state the exact restore command *before* the first edit, in this form:
+```
+git -C <root> restore --source=<sha> --worktree -- <relative-path>
+```
+If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
 
 ## Procedure
 
@@ -66,11 +113,11 @@ echo "${DOCUMENT_HYGIENE_MODE:-$(cat .claude/.hygiene/mode 2>/dev/null || cat ~/
 
 6. **Check structural integrity after edits.** Cross-references, section numbers/letters, link targets, and tier/item IDs still line up. Renumbering drift is common after insertions/deletions.
 
-7. **Deterministic scar scan.** Strip justified markers first, then confirm it's clean:
+7. **Deterministic scar scan.** This is a review list, not an auto-delete list: a hit is a candidate to look at, never by itself proof the text is wrong. Legitimate matches stay in place: a frontmatter title, a code sample (`reversed(values)`), a quotation, a research or decision sentence ("the reversed order improved accuracy"), or the `<!-- authors ... -->` block itself. Strip the authors block and justified markers first, then scan:
    ```
-   sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' <file> | grep -nEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'
+   sed '/<!-- *authors/,/-->/d' <file> | sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' | grep -nEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'
    ```
-   Expect no matches. A `TODO(<reason>)`-style marker is stripped before the scan and is not a match to chase.
+   "Done" means every remaining hit has been looked at and judged legitimate (kept on purpose) or fixed, not that the grep returns zero matches.
 
 8. **Fresh-reader test.** Would someone with zero session history read this as one coherent current document: no contradictions, no "wait, which claim is right?", no visible edit scars? If not, fix what they'd trip on.
 

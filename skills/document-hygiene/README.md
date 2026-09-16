@@ -8,7 +8,7 @@ For anyone maintaining a project doc with AI, not only engineers: product manage
 
 ## What it does
 
-- **Preflight first** (Step 0 in SKILL.md): resolves the mode, skips exempt docs, and scopes work to what the agent actually authored this session.
+- **Preflight first** (Step 0 in SKILL.md): resolves the mode (fail-closed: malformed mode config resolves to propose, never apply), skips exempt docs, scopes automatic apply-mode edits to docs the agent created this session, and (apply mode only) confirms a git recovery baseline before touching anything.
 - Re-reads the full document instead of trusting a memory of it.
 - Re-verifies each factual claim against current evidence (a query, a fetch, a live check), including PM-shaped drift: owners, dates, scope, phase/dependency status, metrics and targets, decisions, counts, tool/file names.
 - Finds contradictions between sections and fixes both sides, not just the one flagged.
@@ -22,9 +22,13 @@ Full step-by-step procedure: [SKILL.md](SKILL.md).
 ## Modes
 
 - **propose** (default): lists proposed changes (current text, proposed text, evidence) and waits for approval before editing.
-- **apply**: edits directly, reports only what needs a human.
+- **apply**: edits directly, but only a doc that's committed and clean in git (tracked, not a symlink, no staged or unstaged changes); anything else gets proposed instead even though the session mode is apply. Reports only what needs a human.
 
-Resolution order: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Switch with `echo apply > .claude/.hygiene/mode` (project) or `echo apply > ~/.claude/document-hygiene/mode` (global). Use `apply` solo; keep `propose` in a multi-agent or shared folder, where an unreviewed edit costs more than a short approval step.
+Resolution order: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Parsing fails closed: once a source is picked (the env var is set, or a mode file exists), an empty or malformed value there resolves to `propose` rather than falling through to a lower-priority source. Switch with `echo apply > .claude/.hygiene/mode` (project) or `echo apply > ~/.claude/document-hygiene/mode` (global). Use `apply` solo; keep `propose` in a multi-agent or shared folder, where an unreviewed edit costs more than a short approval step.
+
+### Recovery: git is the only undo
+
+This tool stores no document content anywhere, not even temporarily: recovery relies entirely on your own git history. In apply mode, before touching a doc, Claude confirms it's committed and clean and states the exact undo command up front: `git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>`. A doc that isn't committed and clean is reported as `not committed and clean, propose only` and edited only after you review and accept the change by hand.
 
 ## When it runs
 
@@ -47,15 +51,16 @@ cp -r skills/document-hygiene ~/.claude/skills/document-hygiene
 
 ## Implementation notes
 
-- A document opts out of tracking with a top-of-file marker in its first 25 lines: `<!-- hygiene: ignore -->` (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`), or via a project-level glob list at `.claude/.hygiene/ignore`. Use this for audit logs or specs where words like "corrected" are the subject matter, not drift.
+- A document opts out of tracking with a top-of-file marker in its first 25 lines: `<!-- hygiene: ignore -->` (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`), or via a project-level glob list at `.claude/.hygiene/ignore`. The glob syntax is a subset of gitignore: shell globs matched against the basename, the project-relative path, and the absolute path; a pattern ending in `/` is a directory prefix (matches anything under it, e.g. `docs/audit/` or `docs/audit/*`); no negation, no `**`. Use this for audit logs or specs where words like "corrected" are the subject matter, not drift.
 - A `TODO`/`FIXME`/`XXX`/`HACK` written as `TODO(<reason>)` is a justified, deliberately kept marker, not a scar: both hooks strip that pattern before scanning. A bare marker with no reason still counts.
-- A file inside the project is always tracked, even when the project itself lives under `/tmp` or `/var/folders`; both paths are canonicalized before comparison so the temp/cache skip only fires for files genuinely outside the project.
-- Runtime tracking state (edit counts, touched/scarred docs) lives outside any project, at `~/.claude/document-hygiene/state/<project-hash>/sessions/<session_id>/`, never inside the repo being edited, and namespaced per session so concurrent agents don't share counters.
+- A file inside the project is always tracked, even when the project itself lives under `/tmp` or `/var/folders`, or when the project root itself is a symlink; both paths are canonicalized before comparison so the temp/cache skip only fires for files genuinely outside the project.
+- Runtime tracking state (edit counts, touched/scarred docs) lives outside any project, at `~/.claude/document-hygiene/state/<project-hash>/sessions/<session_id>/`, never inside the repo being edited, and namespaced per session so concurrent agents don't share counters. Coverage is main-agent edits only: a subagent tool call carries its own `agent_id` and is skipped, and a missing or malformed `session_id` is skipped too, rather than either falling into a shared bucket.
 - The Stop hook exits without emitting when `stop_hook_active` is `true` (Claude Code is already continuing because this same Stop hook fired), so its own cleanup edits can't retrigger it.
-- The scar-scan regex (step 7 in `SKILL.md`) is the deterministic ground truth for "is this document clean":
+- The scar-scan (step 7 in `SKILL.md`) strips the `<!-- authors ... -->` block and justified markers first, then greps for the deterministic ground truth for "is this a candidate to review":
   ```
   correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK
   ```
+  A hit is a lead, not a verdict: legitimate matches (frontmatter, code, quotations, research/decision sentences, the authors block itself) stay.
 
 ## Source
 
