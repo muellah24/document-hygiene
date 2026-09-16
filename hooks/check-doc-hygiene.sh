@@ -9,6 +9,29 @@
 # matching track-doc-edits.sh (kept out of the repo being edited).
 
 INPUT=$(cat 2>/dev/null)
+
+# If jq isn't on the PATH hooks run with, every jq call below returns empty
+# and this hook would silently do nothing, with nobody told nothing is being
+# tracked. Check first, before the "$BASE" existence exit below, so a fresh
+# install (no state dir yet) still reaches this warning. Emit the warning
+# WITHOUT jq (it's the thing that's missing) via a literal JSON string, and
+# only once per outage: gate it on atomically creating a marker directory.
+# `[ -d ... ]` is tested first so a failed mkdir can be told apart: failing
+# because the marker already exists (stay silent) vs. failing because HOME
+# itself is unwritable (still emit, since there's nowhere to remember we did).
+if ! command -v jq >/dev/null 2>&1; then
+  JQ_MISSING_MARKER="$HOME/.claude/document-hygiene/jq-missing"
+  if [ -d "$JQ_MISSING_MARKER" ]; then
+    exit 0
+  fi
+  mkdir -p "$HOME/.claude/document-hygiene" 2>/dev/null
+  mkdir "$JQ_MISSING_MARKER" 2>/dev/null
+  printf '%s\n' '{"systemMessage":"Document Hygiene is disabled: jq is not on the PATH that hooks run with. Install jq (macOS: brew install jq; Debian/Ubuntu: apt install jq) or fix the hook PATH."}'
+  exit 0
+fi
+JQ_MISSING_MARKER="$HOME/.claude/document-hygiene/jq-missing"
+rmdir "$JQ_MISSING_MARKER" 2>/dev/null
+
 # Same resolution as track-doc-edits.sh (git toplevel, then cwd), so both
 # hooks hash the same project root even when CLAUDE_PROJECT_DIR is unset;
 # otherwise the tracker and this hook would read/write different state
@@ -106,8 +129,7 @@ if [ -f "$DIR/scarred-docs" ]; then
     [ -z "$f" ] && continue
     is_exempt "$f" && continue
     [ -f "$f" ] || continue
-    if sed '/<!-- *authors/,/-->/d' "$f" 2>/dev/null \
-         | sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' \
+    if sed -E -e '/<!-- *authors/,/-->/d' -e 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' "$f" 2>/dev/null \
          | grep -qEi "$SCAR_REGEX"; then
       scarred="$scarred $f"
     fi
@@ -132,7 +154,10 @@ fi
 # treated as "propose".
 resolve_mode() {
   m=""
-  if [ -n "${DOCUMENT_HYGIENE_MODE:-}" ]; then
+  # Test presence, not non-emptiness: a SET-but-empty env var still selects
+  # this source and must fail closed to "propose" below, not fall through to
+  # the project or global file (which might say "apply").
+  if [ "${DOCUMENT_HYGIENE_MODE+x}" = x ]; then
     m="$DOCUMENT_HYGIENE_MODE"
   elif [ -f "$PROJECT_DIR/.claude/.hygiene/mode" ]; then
     m=$(cat "$PROJECT_DIR/.claude/.hygiene/mode" 2>/dev/null)
@@ -159,16 +184,24 @@ fi
 # Git is the only undo: this tool stores no document content anywhere. For
 # each doc that would actually be edited in apply mode, print the exact
 # restore command if it's safe to (committed, clean, tracked, a real file);
-# otherwise name it as propose-only so the agent never blind-edits something
-# it can't hand back. Skipped entirely in propose mode: nothing gets edited.
+# otherwise name the specific reason it's propose-only, so the agent never
+# blind-edits something it can't hand back. Skipped entirely in propose mode:
+# nothing gets edited.
+#
+# NEED_GIT_INIT_HINT is set by the caller (see the loop below), not here:
+# recovery_line's output is captured via command substitution, which runs in
+# a subshell, so a variable assignment made inside this function can never
+# be observed by the caller. The caller classifies the returned line instead
+# and appends a one-time hint about enabling apply mode, once per reminder
+# rather than once per doc.
+NEED_GIT_INIT_HINT=0
 recovery_line() {
   f="$1"
-  not_safe="${f}: not committed and clean, propose only"
   if [ "$GIT_OK" -ne 1 ]; then
-    printf '%s' "$not_safe"; return
+    printf '%s: git not installed, propose only' "$f"; return
   fi
   if [ -L "$f" ]; then
-    printf '%s' "$not_safe"; return
+    printf '%s: is a symlink, propose only' "$f"; return
   fi
   # Canonicalize the file's directory before any git call: a temp dir (e.g.
   # macOS /var/folders/...) and its own `git rev-parse --show-toplevel`
@@ -176,25 +209,34 @@ recovery_line() {
   # which would misreport every doc as unsafe.
   fdir=$(cd "$(dirname "$f")" 2>/dev/null && pwd -P)
   if [ -z "$fdir" ]; then
-    printf '%s' "$not_safe"; return
+    printf '%s: not in a git repository, propose only' "$f"
+    return
   fi
   fabs="$fdir/$(basename "$f")"
   root=$(git -C "$fdir" rev-parse --show-toplevel 2>/dev/null)
   if [ -z "$root" ]; then
-    printf '%s' "$not_safe"; return
+    printf '%s: not in a git repository, propose only' "$f"
+    return
   fi
   if ! git -C "$fdir" ls-files --error-unmatch -- "$fabs" >/dev/null 2>&1; then
-    printf '%s' "$not_safe"; return
+    printf '%s: never committed, propose only' "$f"; return
   fi
   if [ -n "$(git -C "$fdir" status --porcelain -- "$fabs" 2>/dev/null)" ]; then
-    printf '%s' "$not_safe"; return
+    printf '%s: has uncommitted changes, propose only' "$f"; return
   fi
   sha=$(git -C "$root" rev-parse HEAD 2>/dev/null)
-  rel=$(git -C "$fdir" ls-files --full-name -- "$fabs" 2>/dev/null | head -n1)
+  # -z gives NUL-terminated, unquoted output regardless of core.quotePath, so
+  # a non-ASCII repo-relative name comes back exactly as it is on disk rather
+  # than as git's C-style quoted escape form (which is not shell-safe as-is).
+  rel=$(git -C "$fdir" ls-files -z --full-name -- "$fabs" 2>/dev/null | tr -d '\0')
   if [ -z "$sha" ] || [ -z "$rel" ]; then
-    printf '%s' "$not_safe"; return
+    printf '%s: never committed, propose only' "$f"; return
   fi
-  printf 'restore: git -C %s restore --source=%s --worktree -- %s' "$root" "$sha" "$rel"
+  # %q shell-quotes the path so a folder/file name containing spaces or other
+  # shell metacharacters can be pasted and run as-is.
+  q_root=$(printf '%q' "$root")
+  q_rel=$(printf '%q' "$rel")
+  printf 'restore: git -C %s restore --source=%s --worktree -- %s' "$q_root" "$sha" "$q_rel"
 }
 
 # Emit only when there is something left to act on. The raw edit count is
@@ -217,9 +259,17 @@ if [ -n "$touched" ] && { [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; }; the
     command -v git >/dev/null 2>&1 && GIT_OK=1
     recovery_txt=""
     for f in "${touched_arr[@]}"; do
+      line=$(recovery_line "$f")
+      case "$line" in
+        *": not in a git repository, propose only") NEED_GIT_INIT_HINT=1 ;;
+      esac
       recovery_txt="${recovery_txt}
-$(recovery_line "$f")"
+$line"
     done
+    if [ "$NEED_GIT_INIT_HINT" -eq 1 ]; then
+      recovery_txt="${recovery_txt}
+To enable apply mode in this folder, ask Claude to set up git here (one time: git init, add the docs, commit)."
+    fi
     msg="${msg}${recovery_txt}"
   fi
 

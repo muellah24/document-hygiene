@@ -93,18 +93,24 @@ Pick `apply` for solo work, where reviewing every proposal is pure overhead. Kee
 
 This tool stores no document content anywhere, not even temporarily: no backup, no versioning, nothing under `~/.claude` beyond edit counts and file paths. Recovery relies entirely on your own git history.
 
-"Git" here means the local save-history inside your project folder (the hidden `.git` directory), not GitHub. Every commit is a snapshot kept on your own disk, and the undo below reads from that snapshot. GitHub is not involved: nothing is pushed, fetched, or read from any server. If a folder is not a git repository yet, or a doc in it has never been committed, apply mode leaves that doc in propose mode; a one-time `git init` and commit is all it takes to enable the automatic path, and you can ask Claude to do that for you. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit:
+"Git" here means the local save-history inside your project folder (the hidden `.git` directory), not GitHub. Every commit is a snapshot kept on your own disk, and the undo below reads from that snapshot. GitHub is not involved: nothing is pushed, fetched, or read from any server. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit, shell-quoted so it can be pasted and run as-is even when the repo path or file name contains spaces:
 ```
 restore: git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>
 ```
-A doc that isn't committed and clean is reported as `<doc>: not committed and clean, propose only` instead: it's edited only after you review and accept the change by hand.
+A doc that isn't safe to auto-edit is named with the specific reason instead, and handled in propose mode (reviewed and accepted by hand) even though the session mode is apply:
+- `<doc>: not in a git repository, propose only` (the folder itself isn't a git repo). Apply mode is unavailable here until you enable it: a one-time `git init`, adding the docs, and a commit is all it takes, and you can ask Claude to do that for you (Claude will ask before running `git init`, since creating a `.git` directory in a folder you didn't ask about, like a Dropbox or Drive folder, is a visible change). The reminder adds this same one-line offer, once, whenever this reason applies to any doc.
+- `<doc>: never committed, propose only` (the folder is a git repo, but this doc was never added and committed).
+- `<doc>: has uncommitted changes, propose only` (the doc has staged or unstaged changes waiting).
+- `<doc>: is a symlink, propose only` (the tool won't blind-edit through a symlink).
+- `<doc>: git not installed, propose only` (no `git` on the PATH at all).
 
 ## Install
 
 Both hook scripts are short, plain bash (each under 250 lines); read them before wiring them in.
 
-1. Copy the skill:
+1. Create the target directories (harmless if they already exist), then copy the skill:
    ```bash
+   mkdir -p ~/.claude/skills ~/.claude/hooks
    cp -r skills/document-hygiene ~/.claude/skills/document-hygiene
    ```
 2. Copy the hooks:
@@ -177,21 +183,43 @@ Nothing else was written anywhere, except any `.claude/.hygiene/` mode or ignore
 - **State lives outside the repo**: under `~/.claude/document-hygiene/state/`, keyed by project and session, so ordinary markdown edits never leave untracked bookkeeping files inside your project.
 - **Hardened cleanup**: the session ID is sanitized against a strict allowlist before it's used to build the path the Stop hook deletes, and that deletion is fenced to its own state directory.
 
+## Using it with other AI coding agents
+
+The automatic reminder (the two hooks) is Claude Code specific today; the reconciliation procedure itself is not. [`INSTRUCTIONS.md`](INSTRUCTIONS.md) is the same procedure rewritten with no dependency on Claude-specific tool names or Claude Code's hook system, for use with any AI coding agent.
+
+| Tool | Where to put `INSTRUCTIONS.md` (or its content) | Automatic hooks |
+|---|---|---|
+| Cursor | `.cursor/rules/` or a skill in `.cursor/skills/` (documented) | Has `afterFileEdit` and `stop` hooks (documented); adapter possible, not shipped |
+| GitHub Copilot (VS Code agent mode) | `.github/copilot-instructions.md` (documented) | VS Code has PostToolUse/Stop hooks in `.github/hooks` (documented); adapter possible, not shipped |
+| GitHub Copilot CLI | Same instructions file (documented) | postToolUse/agentStop hooks (documented); adapter possible |
+| OpenAI Codex CLI | `AGENTS.md` or a skill in `.agents/skills/` (documented) | PostToolUse/Stop hooks (documented); adapter possible |
+| Gemini CLI | `GEMINI.md` or `.gemini/skills/` (documented) | AfterTool/AfterAgent hooks (documented); adapter possible |
+| Google Antigravity | Rules and skills (documented) | PostToolUse/Stop hooks (documented); adapter possible |
+| Continue, Roo Code | Rules/skills only (documented) | No documented end-of-turn hook found; manual use only |
+
+"Documented" means the mechanism appears in the vendor's own reference pages as of September 2026 ([VS Code hooks](https://code.visualstudio.com/docs/agents/reference/hooks-reference), [Copilot hooks](https://docs.github.com/en/copilot/reference/hooks-reference), [Cursor hooks](https://cursor.com/docs/hooks), [Gemini CLI hooks](https://geminicli.com/docs/hooks/reference/), [Antigravity hooks](https://antigravity.google/docs/hooks)); none of these ports has been built or tested end to end. Each tool's edit-event payload and end-of-turn contract differ from Claude Code's, so every port is a small adapter, not a copy.
+
+Adapters are not part of this repo yet; the first one, if any, would be Cursor. Open an issue if you want one.
+
 ## Limits
 
 - Markdown only: `.md`, `.mdx`, `.markdown`. Other formats aren't tracked.
 - The hooks only remind; the reconciliation itself depends on Claude following the skill correctly.
 - Coverage is main-agent edits only: subagent tool calls aren't tracked.
-- The recovery check needs git and a doc that's already committed and clean; anything else falls back to propose mode regardless of the session's mode setting.
+- The recovery check needs git and a doc that's already committed and clean; anything else falls back to propose mode regardless of the session's mode setting. A folder that isn't a git repository at all works in propose mode with no setup: the reminder names that as the specific reason and offers to set git up for you (see Recovery above).
 - Developed and tested on macOS and Linux shells (bash, jq); not on Windows.
-- The tracker hook starts a short bash process (using jq) on every Edit, Write, or MultiEdit tool call; it exits immediately for anything that is not a Markdown file. Git is invoked only by the Stop hook, and only in apply mode.
+- The tracker hook starts a short bash process (using jq) on every Edit, Write, or MultiEdit tool call; it exits immediately for anything that is not a Markdown file. Both hooks call `git rev-parse` to find the project root whenever `CLAUDE_PROJECT_DIR` is unset, in every mode (falling back harmlessly to the current directory if git is absent); the recovery-baseline git calls inside `recovery_line` are the only git calls limited to apply mode.
 
 ## Requirements
 
-- Claude Code with hooks support.
-- `jq` and `bash` (both hook scripts depend on `jq` for parsing the hook JSON payload).
-- `shasum` or `sha1sum` (used to key runtime state by project directory; `shasum` ships with macOS, `sha1sum` with most Linux distros). If neither is present, all projects share one state directory (still separated per session).
-- `git`, optional: only for the apply-mode recovery check; without it every doc is handled in propose mode.
+- macOS or Linux with bash 3.2 or newer. Native Windows is not supported (the hooks are bash scripts); WSL is untested.
+- Claude Code with PostToolUse and Stop command hooks.
+- `jq` on the PATH that hooks run with (not only in your interactive shell). Stock macOS does not ship it: `brew install jq`. If it is missing, the Stop hook tells you once and nothing is tracked until it is installed.
+- Standard Unix tools: cat, cut, basename, dirname, head, grep, sed, sort, find, mkdir, rm. Present on macOS and any normal Linux; a minimal container image needs bash, jq, grep, sed and findutils installed.
+- A writable `~/.claude/document-hygiene` directory (created on first use).
+- Recommended: `shasum` or `sha1sum` (macOS has shasum, most Linux distros have sha1sum). Without either, all projects share one state directory, still separated per session.
+- Optional: git 2.23 or newer, for the apply-mode recovery check and the `git restore` undo command. Without git every doc is handled in propose mode; project-root detection falls back to the current directory.
+- Running the tests additionally needs awk, mktemp, ln, tr, wc; the YAML check uses Ruby or Python 3 with PyYAML if present, otherwise it is skipped.
 
 ## Tests
 

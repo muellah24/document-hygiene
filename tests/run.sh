@@ -51,7 +51,25 @@ new_project() { mktemp -d; }
 session_bucket_dir() {
   local project_dir="$1" session_id="$2" hash
   hash=$(printf '%s' "$project_dir" | { shasum 2>/dev/null || sha1sum 2>/dev/null; } | cut -c1-16)
+  # Mirror the hooks' own fallback: no shasum and no sha1sum on PATH means
+  # every project shares one "default" state bucket (still split per session).
+  [ -z "$hash" ] && hash="default"
   printf '%s/.claude/document-hygiene/state/%s/sessions/%s\n' "$HOME" "$hash" "$session_id"
+}
+
+# build_restricted_path_no_jq [extra binaries...]
+# Creates a temp bin dir containing symlinks to the given binaries (plus a
+# base set the hooks need), resolved from the CURRENT PATH, deliberately
+# omitting jq. Printed on stdout. Used to prove the jq-missing branch: a
+# PATH that genuinely cannot resolve jq, not a jq-shaped stub.
+build_restricted_path_no_jq() {
+  local d b p
+  d=$(mktemp -d)
+  for b in cat cut head grep sed sort find mkdir rm rmdir basename dirname tr "$@"; do
+    p=$(command -v "$b" 2>/dev/null)
+    [ -n "$p" ] && ln -sf "$p" "$d/$b"
+  done
+  printf '%s\n' "$d"
 }
 
 # --- syntax check --------------------------------------------------------------
@@ -476,7 +494,7 @@ if command -v git >/dev/null 2>&1; then
 
   ok_restore="no"; ok_propose="no"
   printf '%s' "$out" | grep -q 'restore: git -C' && printf '%s' "$out" | grep -q -- '-- committed.md' && ok_restore="yes"
-  printf '%s' "$out" | grep -q 'dirty.md: not committed and clean, propose only' && ok_propose="yes"
+  printf '%s' "$out" | grep -q 'dirty.md: has uncommitted changes, propose only' && ok_propose="yes"
   if [ "$ok_restore" = "yes" ] && [ "$ok_propose" = "yes" ]; then
     pass "case19: apply-mode reminder prints a restore line for a clean doc, propose-only for a dirty doc"
   else
@@ -536,6 +554,298 @@ if [ "$count_outside" = "0" ] && [ "$count_after_inside" = "1" ]; then
   pass "case21: plain mktemp -d scratch dir is excluded; the same file inside the project is tracked"
 else
   fail "case21: plain mktemp -d scratch dir is excluded; the same file inside the project is tracked (outside=$count_outside after_inside=$count_after_inside)"
+fi
+
+# --- case 22-25: missing jq on the hook's PATH --------------------------------
+# Regression for FIX 1: a PATH that genuinely cannot resolve jq (built from
+# symlinks to only the binaries the hooks need, jq deliberately excluded),
+# not a PATH override that merely hides a working jq. Payloads below are
+# literal JSON, not jq-generated, since jq itself may be unavailable to the
+# test process for these specific calls too (it isn't, but the point of the
+# case is a hook that can't find jq, so its own input shouldn't depend on it
+# being able to either).
+
+BASH_BIN=$(command -v bash)
+JQ_MARKER="$HOME/.claude/document-hygiene/jq-missing"
+NO_JQ_PATH=$(build_restricted_path_no_jq)
+
+proj=$(new_project)
+sid="case22-$$"
+doc="$proj/plan.md"
+printf '# Plan\n\nTODO fix the thing\n' > "$doc"
+rm -rf "$JQ_MARKER" 2>/dev/null
+out=$(printf '{"session_id":"%s","tool_input":{"file_path":"%s"}}' "$sid" "$doc" \
+  | CLAUDE_PROJECT_DIR="$proj" PATH="$NO_JQ_PATH" "$BASH_BIN" "$TRACK")
+rc=$?
+bucket=$(session_bucket_dir "$proj" "$sid")
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ ! -d "$bucket" ]; then
+  pass "case22: tracker with jq missing from PATH exits 0 and records nothing"
+else
+  fail "case22: tracker with jq missing from PATH exits 0 and records nothing (rc=$rc out='$out' bucket exists=$([ -d "$bucket" ] && echo yes || echo no))"
+fi
+
+sid="case23-$$"
+rm -rf "$JQ_MARKER" 2>/dev/null
+EXPECTED_JQ_MSG='{"systemMessage":"Document Hygiene is disabled: jq is not on the PATH that hooks run with. Install jq (macOS: brew install jq; Debian/Ubuntu: apt install jq) or fix the hook PATH."}'
+out=$(printf '{"session_id":"%s","stop_hook_active":false}' "$sid" \
+  | CLAUDE_PROJECT_DIR="$proj" PATH="$NO_JQ_PATH" "$BASH_BIN" "$STOP")
+if [ "$out" = "$EXPECTED_JQ_MSG" ] && [ -d "$JQ_MARKER" ]; then
+  pass "case23: Stop hook with jq missing from PATH emits the systemMessage JSON once and creates the outage marker"
+else
+  fail "case23: Stop hook with jq missing from PATH emits the systemMessage JSON once and creates the outage marker (got: $out)"
+fi
+
+out=$(printf '{"session_id":"%s","stop_hook_active":false}' "$sid" \
+  | CLAUDE_PROJECT_DIR="$proj" PATH="$NO_JQ_PATH" "$BASH_BIN" "$STOP")
+if [ -z "$out" ]; then
+  pass "case24: Stop hook with jq missing from PATH emits nothing on a second run (marker already present)"
+else
+  fail "case24: Stop hook with jq missing from PATH emits nothing on a second run (got: $out)"
+fi
+
+# jq restored (normal PATH): one run must clear the outage marker.
+printf '{"session_id":"%s","stop_hook_active":false}' "$sid" \
+  | CLAUDE_PROJECT_DIR="$proj" bash "$STOP" >/dev/null
+if [ ! -d "$JQ_MARKER" ]; then
+  pass "case25: outage marker is gone after one Stop hook run with jq restored"
+else
+  fail "case25: outage marker is gone after one Stop hook run with jq restored (marker still present)"
+fi
+rm -rf "$NO_JQ_PATH"
+
+# --- case 26/27: DOCUMENT_HYGIENE_MODE="" (set but empty) fails closed -------
+# Regression for FIX 2: presence, not non-emptiness, selects the env-var
+# source. A set-but-empty value must resolve to propose directly rather than
+# falling through to a project/global file that says apply.
+
+proj=$(new_project)
+sid="case26-$$"
+doc="$proj/plan.md"
+printf '# Plan\n\nTODO fix the thing\n' > "$doc"
+edit_hook "$proj" "$sid" "$doc" >/dev/null
+mkdir -p "$proj/.claude/.hygiene"
+printf 'apply\n' > "$proj/.claude/.hygiene/mode"
+out=$(printf '{"session_id":"%s","stop_hook_active":false}' "$sid" \
+  | DOCUMENT_HYGIENE_MODE="" CLAUDE_PROJECT_DIR="$proj" bash "$STOP")
+if printf '%s' "$out" | grep -q 'Mode: propose'; then
+  pass "case26: DOCUMENT_HYGIENE_MODE=\"\" (set but empty) resolves to propose despite a project file saying apply"
+else
+  fail "case26: DOCUMENT_HYGIENE_MODE=\"\" (set but empty) resolves to propose despite a project file saying apply (got: $out)"
+fi
+
+if command -v git >/dev/null 2>&1; then
+  proj=$(new_project)
+  git -C "$proj" init -q
+  mkdir -p "$proj/.claude/.hygiene"
+  printf 'apply\n' > "$proj/.claude/.hygiene/mode"
+
+  snippet_file=$(mktemp)
+  awk '/MODE_SNIPPET_START/{f=1; next} /MODE_SNIPPET_END/{f=0} f' "$REPO_ROOT/skills/document-hygiene/SKILL.md" \
+    | sed -e '/^```/d' > "$snippet_file"
+
+  out=$(cd "$proj" && env -u CLAUDE_PROJECT_DIR DOCUMENT_HYGIENE_MODE= bash "$snippet_file")
+  rm -f "$snippet_file"
+  if [ "$out" = "propose" ]; then
+    pass "case27: SKILL.md mode snippet with DOCUMENT_HYGIENE_MODE=\"\" resolves to propose despite a project file saying apply"
+  else
+    fail "case27: SKILL.md mode snippet with DOCUMENT_HYGIENE_MODE=\"\" resolves to propose despite a project file saying apply (got: $out)"
+  fi
+else
+  echo "SKIP: case27 (git not available)"
+fi
+
+# --- case 28: restore command survives spaces in the project dir and doc name
+# Regression for FIX 3: the restore line must be shell-quoted so a folder or
+# file name with a space can be pasted and run as-is. Evaluated with eval in
+# a subshell, exactly the way a human would paste the printed command.
+
+if command -v git >/dev/null 2>&1; then
+  space_root=$(mktemp -d)
+  proj="$space_root/My Project"
+  mkdir -p "$proj"
+  sid="case28-$$"
+  git -C "$proj" init -q
+  git -C "$proj" config user.email "test@example.com"
+  git -C "$proj" config user.name "Test"
+  doc="$proj/My Plan.md"
+  # A bare TODO makes the doc a scar candidate, so the reminder (and its
+  # recovery baseline, the thing under test) fires after a single edit
+  # instead of needing five.
+  printf '# My Plan\n\nOriginal content\n\nTODO fix\n' > "$doc"
+  git -C "$proj" add "My Plan.md"
+  git -C "$proj" -c commit.gpgsign=false commit -q -m init
+
+  edit_hook "$proj" "$sid" "$doc" >/dev/null
+  out=$(jq -cn --arg sid "$sid" '{session_id:$sid, stop_hook_active:false}' \
+    | DOCUMENT_HYGIENE_MODE=apply CLAUDE_PROJECT_DIR="$proj" bash "$STOP")
+
+  ctx=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null)
+  restore_cmd=$(printf '%s\n' "$ctx" | grep '^restore: ' | head -n1)
+  restore_cmd="${restore_cmd#restore: }"
+
+  printf '# My Plan\n\nModified content\n' > "$doc"
+  ( eval "$restore_cmd" ) >/dev/null 2>&1
+  content_after=$(cat "$doc" 2>/dev/null)
+  expected_content=$(printf '# My Plan\n\nOriginal content\n\nTODO fix\n')
+  if [ -n "$restore_cmd" ] && [ "$content_after" = "$expected_content" ]; then
+    pass "case28: restore command survives spaces in project dir and doc name (eval restores original content)"
+  else
+    fail "case28: restore command survives spaces in project dir and doc name (eval restores original content) (cmd='$restore_cmd' content='$content_after')"
+  fi
+  rm -rf "$space_root"
+else
+  echo "SKIP: case28 (git not available)"
+fi
+
+# --- case 29/30: merged sed (FIX 5) matches the old two-process pipeline ----
+
+proj=$(new_project)
+sid="case29-$$"
+doc="$proj/mixed.md"
+cat > "$doc" <<'EOF'
+# Mixed
+
+<!-- authors (newest first):
+- Claude Sonnet 5 · effort low · 2026-09-17 · corrected the launch date
+-->
+
+TODO(keep until v2 ships) revisit this later.
+
+Nothing else scary here.
+EOF
+edit_hook "$proj" "$sid" "$doc" >/dev/null
+bucket=$(session_bucket_dir "$proj" "$sid")
+scarred="no"
+[ -f "$bucket/scarred-docs" ] && grep -qxF "$doc" "$bucket/scarred-docs" && scarred="yes"
+if [ "$scarred" = "no" ]; then
+  pass "case29: an authors-block 'corrected' plus a justified TODO(reason) is not flagged as a scar"
+else
+  fail "case29: an authors-block 'corrected' plus a justified TODO(reason) is not flagged as a scar (was flagged)"
+fi
+
+proj=$(new_project)
+sid="case30-$$"
+doc="$proj/mixed2.md"
+cat > "$doc" <<'EOF'
+# Mixed 2
+
+<!-- authors (newest first):
+- Claude Sonnet 5 · effort low · 2026-09-17 · corrected the launch date
+-->
+
+We corrected the launch date to March 3.
+EOF
+edit_hook "$proj" "$sid" "$doc" >/dev/null
+bucket=$(session_bucket_dir "$proj" "$sid")
+tracker_scarred="no"
+[ -f "$bucket/scarred-docs" ] && grep -qxF "$doc" "$bucket/scarred-docs" && tracker_scarred="yes"
+out=$(stop_hook "$proj" "$sid")
+stop_scarred="no"
+printf '%s' "$out" | grep -qi 'Drift/changelog markers' && printf '%s' "$out" | grep -qF "$doc" && stop_scarred="yes"
+if [ "$tracker_scarred" = "yes" ] && [ "$stop_scarred" = "yes" ]; then
+  pass "case30: a genuine outside-block 'corrected' is flagged as a scar by both hooks' merged sed"
+else
+  fail "case30: a genuine outside-block 'corrected' is flagged as a scar by both hooks' merged sed (tracker=$tracker_scarred stop=$stop_scarred)"
+fi
+
+# --- case 31-35: FIX 7 reason strings (one per unsafe-to-edit reason) -------
+
+if command -v git >/dev/null 2>&1; then
+  # case 31: not in a git repository at all.
+  proj=$(new_project)
+  sid="case31-$$"
+  doc="$proj/plan.md"
+  printf '# Plan\n\nTODO fix\n' > "$doc"
+  edit_hook "$proj" "$sid" "$doc" >/dev/null
+  out=$(jq -cn --arg sid "$sid" '{session_id:$sid, stop_hook_active:false}' \
+    | DOCUMENT_HYGIENE_MODE=apply CLAUDE_PROJECT_DIR="$proj" bash "$STOP")
+  if printf '%s' "$out" | grep -qF "$doc: not in a git repository, propose only" \
+     && printf '%s' "$out" | grep -q 'To enable apply mode in this folder'; then
+    pass "case31: a doc outside any git repo reports 'not in a git repository, propose only' plus the one-time git-init offer"
+  else
+    fail "case31: a doc outside any git repo reports 'not in a git repository, propose only' plus the one-time git-init offer (got: $out)"
+  fi
+
+  # case 32: in a git repo, but this doc was never added/committed.
+  proj=$(new_project)
+  sid="case32-$$"
+  git -C "$proj" init -q
+  git -C "$proj" config user.email "test@example.com"
+  git -C "$proj" config user.name "Test"
+  printf '# Init\n' > "$proj/README.md"
+  git -C "$proj" add README.md
+  git -C "$proj" -c commit.gpgsign=false commit -q -m init
+  doc="$proj/untracked.md"
+  printf '# Untracked\n\nTODO fix\n' > "$doc"
+  edit_hook "$proj" "$sid" "$doc" >/dev/null
+  out=$(jq -cn --arg sid "$sid" '{session_id:$sid, stop_hook_active:false}' \
+    | DOCUMENT_HYGIENE_MODE=apply CLAUDE_PROJECT_DIR="$proj" bash "$STOP")
+  if printf '%s' "$out" | grep -qF "$doc: never committed, propose only"; then
+    pass "case32: an untracked doc in an initialized repo reports 'never committed, propose only'"
+  else
+    fail "case32: an untracked doc in an initialized repo reports 'never committed, propose only' (got: $out)"
+  fi
+
+  # case 33: has uncommitted changes (also covered by case19; kept explicit
+  # here so each FIX 7 reason string has its own dedicated case).
+  proj=$(new_project)
+  sid="case33-$$"
+  git -C "$proj" init -q
+  git -C "$proj" config user.email "test@example.com"
+  git -C "$proj" config user.name "Test"
+  doc="$proj/dirty.md"
+  printf '# Dirty\n\nTODO fix\n' > "$doc"
+  git -C "$proj" add dirty.md
+  git -C "$proj" -c commit.gpgsign=false commit -q -m init
+  printf '# Dirty\n\nTODO fix, edited\n' > "$doc"
+  edit_hook "$proj" "$sid" "$doc" >/dev/null
+  out=$(jq -cn --arg sid "$sid" '{session_id:$sid, stop_hook_active:false}' \
+    | DOCUMENT_HYGIENE_MODE=apply CLAUDE_PROJECT_DIR="$proj" bash "$STOP")
+  if printf '%s' "$out" | grep -qF "$doc: has uncommitted changes, propose only"; then
+    pass "case33: a doc with uncommitted changes reports 'has uncommitted changes, propose only'"
+  else
+    fail "case33: a doc with uncommitted changes reports 'has uncommitted changes, propose only' (got: $out)"
+  fi
+
+  # case 34: the touched path is a symlink.
+  proj=$(new_project)
+  sid="case34-$$"
+  git -C "$proj" init -q
+  git -C "$proj" config user.email "test@example.com"
+  git -C "$proj" config user.name "Test"
+  printf '# Real\n\nTODO fix\n' > "$proj/real.md"
+  git -C "$proj" add real.md
+  git -C "$proj" -c commit.gpgsign=false commit -q -m init
+  link="$proj/link.md"
+  ln -s "$proj/real.md" "$link"
+  edit_hook "$proj" "$sid" "$link" >/dev/null
+  out=$(jq -cn --arg sid "$sid" '{session_id:$sid, stop_hook_active:false}' \
+    | DOCUMENT_HYGIENE_MODE=apply CLAUDE_PROJECT_DIR="$proj" bash "$STOP")
+  if printf '%s' "$out" | grep -qF "$link: is a symlink, propose only"; then
+    pass "case34: a symlinked doc reports 'is a symlink, propose only'"
+  else
+    fail "case34: a symlinked doc reports 'is a symlink, propose only' (got: $out)"
+  fi
+
+  # case 35: git itself is not on the hook's PATH. Needs jq (and shasum/
+  # sha1sum, so the Stop hook finds the SAME state bucket the tracker wrote
+  # with the normal PATH) but not git.
+  proj=$(new_project)
+  sid="case35-$$"
+  doc="$proj/plan.md"
+  printf '# Plan\n\nTODO fix\n' > "$doc"
+  edit_hook "$proj" "$sid" "$doc" >/dev/null
+  no_git_path=$(build_restricted_path_no_jq jq shasum sha1sum)
+  out=$(jq -cn --arg sid "$sid" '{session_id:$sid, stop_hook_active:false}' \
+    | DOCUMENT_HYGIENE_MODE=apply CLAUDE_PROJECT_DIR="$proj" PATH="$no_git_path" "$BASH_BIN" "$STOP")
+  rm -rf "$no_git_path"
+  if printf '%s' "$out" | grep -qF "$doc: git not installed, propose only"; then
+    pass "case35: git missing from PATH reports 'git not installed, propose only'"
+  else
+    fail "case35: git missing from PATH reports 'git not installed, propose only' (got: $out)"
+  fi
+else
+  echo "SKIP: case31-35 (git not available)"
 fi
 
 # --- summary ------------------------------------------------------------------

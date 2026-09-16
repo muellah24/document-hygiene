@@ -40,7 +40,8 @@ Once a source is selected (the env var is set, or the project file exists, or th
 <!-- MODE_SNIPPET_START -->
 ```bash
 ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-if [ -n "${DOCUMENT_HYGIENE_MODE:-}" ]; then
+# Test presence, not non-emptiness: a SET-but-empty env var still selects this source.
+if [ "${DOCUMENT_HYGIENE_MODE+x}" = x ]; then
   RAW="$DOCUMENT_HYGIENE_MODE"
 elif [ -f "$ROOT/.claude/.hygiene/mode" ]; then
   RAW=$(cat "$ROOT/.claude/.hygiene/mode" 2>/dev/null)
@@ -85,9 +86,9 @@ If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relativ
 ```
 git -C <root> restore --source=<sha> --worktree -- <relative-path>
 ```
-When the pass was triggered by the Stop-hook reminder in apply mode, the reminder already lists this command per doc; reuse it rather than recomputing.
+The command must be shell-quoted (e.g. with bash's `printf '%q'`) so a root or relative path containing spaces or other shell metacharacters can still be pasted and run as-is. When the pass was triggered by the Stop-hook reminder in apply mode, the reminder already lists this command per doc, already quoted; reuse it rather than recomputing.
 
-If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
+If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line, naming the specific reason (not in a git repository, never committed, has uncommitted changes, is a symlink, or git not installed). When the reason is "not in a git repository", say so and OFFER to initialize git for the folder (one time: `git init`, add the docs, commit); never run `git init` unasked, because creating a `.git` directory in someone's folder (Dropbox, Drive, a shared folder) is a visible change they must approve. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
 
 ## Procedure
 
@@ -117,7 +118,7 @@ If any check fails, handle that doc in propose mode even though the session mode
 
 7. **Deterministic scar scan.** This is a review list, not an auto-delete list: a hit is a candidate to look at, never by itself proof the text is wrong. Legitimate matches stay in place: a frontmatter title, a code sample (`reversed(values)`), a quotation, a research or decision sentence ("the reversed order improved accuracy"), or the `<!-- authors ... -->` block itself. Strip the authors block and justified markers first, then scan:
    ```
-   sed '/<!-- *authors/,/-->/d' <file> | sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' | grep -nEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'
+   sed -E -e '/<!-- *authors/,/-->/d' -e 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' <file> | grep -nEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'
    ```
    "Done" means every remaining hit has been looked at and judged legitimate (kept on purpose) or fixed, not that the grep returns zero matches.
 

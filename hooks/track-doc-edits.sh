@@ -28,6 +28,18 @@
 #     edits never litter project trees with untracked bookkeeping files.
 
 INPUT=$(cat 2>/dev/null)
+
+# If jq isn't on the PATH hooks run with, every jq call below returns empty
+# and FP would look "unset", silently skipping every edit with nobody told.
+# Fail loud instead: stop here (nothing to track without jq), and clear the
+# outage marker on recovery so check-doc-hygiene.sh's one-time warning
+# re-arms if jq later goes missing again.
+JQ_MISSING_MARKER="$HOME/.claude/document-hygiene/jq-missing"
+if ! command -v jq >/dev/null 2>&1; then
+  exit 0
+fi
+rmdir "$JQ_MISSING_MARKER" 2>/dev/null
+
 # Same resolution as check-doc-hygiene.sh (git toplevel, then cwd), so both
 # hooks hash the same project root even when CLAUDE_PROJECT_DIR is unset;
 # otherwise the tracker and the Stop hook would write/read different state
@@ -191,8 +203,7 @@ SCAR_REGEX='correction|corrected|reversed|verified live|earlier draft|previously
 # A justified marker written as TODO(<reason>)/FIXME(<reason>)/XXX(<reason>)/
 # HACK(<reason>) is a deliberately kept marker, not a scar, so strip those
 # before scanning: only a BARE marker (no parenthesized reason) should count.
-if [ -f "$FP" ] && sed '/<!-- *authors/,/-->/d' "$FP" 2>/dev/null \
-     | sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' \
+if [ -f "$FP" ] && sed -E -e '/<!-- *authors/,/-->/d' -e 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' "$FP" 2>/dev/null \
      | grep -qEi "$SCAR_REGEX"; then
   grep -qxF "$FP" "$DIR/scarred-docs" 2>/dev/null || echo "$FP" >> "$DIR/scarred-docs"
 fi
