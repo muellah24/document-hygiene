@@ -3,6 +3,8 @@ name: document-hygiene
 description: Use when maintaining a long-lived document, plan, spec, report, README, or any artifact edited across multiple turns or days — to fact-check it against current evidence, remove stale or contradicted claims, and strip accumulated changelog/correction narration so it reads as a clean current version. Trigger on "clean up this doc", "is this still accurate", "remove the correction scars", a doc edited many times, after reversing/correcting any earlier claim, or when the automatic Stop-hook hygiene reminder fires.
 ---
 
+<!-- hygiene: ignore --><!-- this skill documents the hygiene tool's own trigger vocabulary (corrected/reversed/TODO/etc.) as subject matter, not as drift in the doc itself -->
+
 # Document Hygiene
 
 Long-lived artifacts drift: each turn patches the immediate ask and leaves old text in place, so stale claims, self-contradictions, and changelog scars accumulate. Patching is not reconciling. This skill reconciles an artifact back to a single, current, clean truth.
@@ -35,7 +37,7 @@ Long-lived artifacts drift: each turn patches the immediate ask and leaves old t
 
 8. **Fresh-reader test.** Would someone with zero session history read this as one coherent current document — no contradictions, no "wait, which claim is right?", no visible edit scars? If not, fix what they'd trip on.
 
-9. **Report.** State briefly what you pruned and what you re-verified (especially any claim that turned out stale and was corrected) — so the human knows the doc was reconciled, not just re-saved.
+9. **Report only what needs action.** Housekeeping is your job, not a status update — run the pass and say nothing about it by default. Surface something only when it changes what the reader does: a claim you fixed that contradicts advice they already acted on, a decision only they can make, or a setting they need to change. When you do surface it, lead with that, not with a summary of what you pruned.
 
 ## Anti-patterns
 - Trusting your own summary of the doc instead of re-reading it.

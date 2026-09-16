@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PostToolUse(Edit|Write) hook — document-hygiene drift tracker.
+# PostToolUse(Edit|Write|MultiEdit) hook — document-hygiene drift tracker.
 # Records edits to long-form docs (.md/.mdx) and scans each for "scar" markers
 # (changelog narration, stale-claim flags). Pure bookkeeping; never blocks.
 #
@@ -37,6 +37,13 @@ FP=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
 # config, not drift-prone deliverables.
 case "$FP" in
   */.claude/*) exit 0 ;;
+esac
+
+# Skip OS temp/scratch/cache dirs — fetched-doc caches and agent scratchpads
+# (e.g. /var/folders/.../openai-docs-cache/*.md, /private/tmp/claude-*/...)
+# aren't a maintained deliverable and shouldn't inflate any project's counter.
+case "$FP" in
+  /tmp/*|/private/tmp/*|/var/folders/*|*/.cache/*) exit 0 ;;
 esac
 
 # Only track long-form documents (where drift accumulates).
