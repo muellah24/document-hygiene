@@ -1,3 +1,5 @@
+<!-- hygiene: ignore --><!-- this file documents the hygiene tool's own trigger vocabulary (corrected/reversed/TODO/etc.) as subject matter, not as drift in the doc itself -->
+
 # Document Hygiene: platform-neutral procedure
 
 This is the document-hygiene reconciliation procedure written for any AI coding agent, not only Claude Code. It has no dependency on Claude-specific tool names or Claude Code's hook system. Use it standalone: paste it into an agent's instructions file, or follow it directly when asked to clean up a long-lived document.
