@@ -22,7 +22,7 @@ Full step-by-step procedure: [SKILL.md](SKILL.md).
 ## Modes
 
 - **propose** (default): lists proposed changes (current text, proposed text, evidence) and waits for approval before editing.
-- **apply**: edits directly, but only a doc that's committed and clean in git (tracked, not a symlink, no staged or unstaged changes); anything else gets proposed instead even though the session mode is apply. Reports only what needs a human.
+- **apply**: edits directly, but only a doc that's committed and clean in git (tracked, not a symlink, no staged or unstaged changes); anything else gets proposed instead even though the session mode is apply. Replies `Hygiene pass: ok` when nothing needs a human, and expands only when something does.
 
 Resolution order: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Parsing fails closed: once a source is picked (the env var is set, or a mode file exists), an empty or malformed value there resolves to `propose` rather than falling through to a lower-priority source. Switch with `echo apply > .claude/.hygiene/mode` (project) or `echo apply > ~/.claude/document-hygiene/mode` (global). Use `apply` solo; keep `propose` in a multi-agent or shared folder, where an unreviewed edit costs more than a short approval step.
 

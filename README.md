@@ -48,7 +48,7 @@ Three pieces, all Claude Code native (no external service):
 ### Modes: propose vs. apply
 
 - **propose** (default): Claude re-reads and re-verifies as usual but doesn't edit the doc. It presents a compact list of proposed changes (current text, proposed text, evidence) and waits for you to accept.
-- **apply**: Claude edits directly, but only for a doc that is committed and clean in git (tracked, not a symlink, no staged or unstaged changes); a doc that isn't gets proposed instead even though the session mode is apply. Claude reports only what actually needs a human: a contradicted decision you already acted on, a decision only you can make, a setting to change.
+- **apply**: Claude edits directly, but only for a doc that is committed and clean in git (tracked, not a symlink, no staged or unstaged changes); a doc that isn't gets proposed instead even though the session mode is apply. When nothing needs you, Claude replies with one line, `Hygiene pass: ok`; it writes more only for something that needs a human (a contradicted decision you already acted on, a decision only you can make, a setting to change) or something unusual in the pass.
 
 Resolution order, first match wins: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Parsing fails closed: once a source is picked (the env var is set, or a mode file exists), an empty or malformed value there resolves to `propose` directly rather than falling through to a lower-priority source.
 

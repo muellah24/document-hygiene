@@ -150,7 +150,7 @@ resolve_mode() {
 }
 MODE=$(resolve_mode)
 if [ "$MODE" = "apply" ]; then
-  mode_txt="Mode: apply (edit directly, report only what needs a human)."
+  mode_txt="Mode: apply (edit directly; when nothing needs a human, reply with the single line 'Hygiene pass: ok' and nothing more)."
 else
   mode_txt="Mode: propose (list proposed changes and wait for approval; switch with \`echo apply > .claude/.hygiene/mode\`)."
 fi

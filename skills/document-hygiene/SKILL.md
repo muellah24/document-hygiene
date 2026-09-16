@@ -121,7 +121,7 @@ If any check fails, handle that doc in propose mode even though the session mode
 
 8. **Fresh-reader test.** Would someone with zero session history read this as one coherent current document: no contradictions, no "wait, which claim is right?", no visible edit scars? If not, fix what they'd trip on.
 
-9. **Report according to mode.** In **apply** mode: housekeeping is your job, not a status update: run the pass and say nothing about it by default. Surface something only when it changes what the reader does: a claim you fixed that contradicts advice they already acted on, a decision only they can make, or a setting they need to change. When you do surface it, lead with that, not with a summary of what you pruned. In **propose** mode: present the compact change list from Step 0(a) and stop; do not apply anything until the user accepts.
+9. **Report according to mode.** In **apply** mode: housekeeping is your job, not a status update. When nothing needs the user, reply with one line, `Hygiene pass: ok`, and nothing more: no list of what you pruned, re-verified or renamed, no restating of the project status. Write more only when something changes what the user does (a claim you fixed that contradicts advice they already acted on, a decision only they can make, a setting they need to change) or when something out of the ordinary happened in the pass (a doc you could not reconcile, a restore you had to run, a contradiction you could not resolve). Then lead with that item, not with the pass. In **propose** mode: present the compact change list from Step 0(a) and stop; do not apply anything until the user accepts.
 
 ## Anti-patterns
 - Trusting your own summary of the doc instead of re-reading it.
