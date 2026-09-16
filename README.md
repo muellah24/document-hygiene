@@ -2,7 +2,9 @@
 
 # Document Hygiene
 
-A Claude Code skill + hook pair that stops long-lived AI-written documents (plans, specs, reports, READMEs) from drifting: it catches stale claims, self-contradictions, and changelog scar tissue, and forces a clean rewrite before you ship the doc.
+A Claude Code skill + hook pair that stops long-lived AI-written documents from drifting: it catches stale claims, self-contradictions, and changelog scar tissue, and forces a clean rewrite before you ship the doc.
+
+For anyone who runs a project with a goal, keeps a living document about it, and uses AI to iterate on execution: product managers, project managers, product owners, scrum masters, founders, vibe coders. If you have a launch plan, a spec, a status report, or a README that gets edited over and over by an AI agent, that document is drifting right now and this tool is for you.
 
 ![Document Hygiene](docs/document-hygiene-comic-FULL.jpg)
 
@@ -39,9 +41,33 @@ Patching is not reconciling. This tool watches the sediment build up and forces 
 
 Three pieces, all Claude Code native (no external service):
 
-1. **`hooks/track-doc-edits.sh`** — `PostToolUse` hook on `Edit|Write|MultiEdit`. Every time a `.md`/`.mdx` file is touched, it counts the edit and greps the file for scar markers (`corrected`, `reversed`, `TODO`, `⚠`, etc.). State is namespaced per Claude `session_id`, so concurrent agents/sessions never share counters or get blamed for each other's edits.
-2. **`hooks/check-doc-hygiene.sh`** — `Stop` hook. When a session ends, if it made 5+ doc edits or any touched doc shows scar markers, it injects a reminder into context naming exactly which docs to reconcile. Only ever *reminds* — never blocks — and only reports on docs the current session itself edited.
-3. **`skills/document-hygiene/SKILL.md`** — the actual procedure Claude follows when the reminder fires (or when you ask "clean up this doc," "is this still accurate," etc.): re-read the whole doc fresh, re-verify every factual claim against current evidence, reconcile contradictions, strip changelog narration, resolve stale TODOs, check structural integrity, then a deterministic `grep` scar-scan before reporting.
+1. **`hooks/track-doc-edits.sh`** — `PostToolUse` hook on `Edit|Write|MultiEdit`. Every time a `.md`/`.mdx` file is touched, it counts the edit and greps the file for scar markers (`corrected`, `reversed`, `TODO`, `⚠`, etc.). A file inside the project is always tracked, even if the project itself lives under `/tmp`; the temp/cache skip only applies to files outside the project. State is namespaced per Claude `session_id`, so concurrent agents/sessions never share counters or get blamed for each other's edits.
+2. **`hooks/check-doc-hygiene.sh`** — `Stop` hook. When a session ends, if it made 5+ doc edits or any touched doc shows scar markers, it injects a reminder into context naming exactly which docs to reconcile, and states the current mode (see below). Exits silently, with no reminder, when `stop_hook_active` is true (Claude is already continuing because of this same hook) or when every touched doc turned out to be exempt. Only ever *reminds* — never blocks — and only reports on docs the current session itself edited.
+3. **`skills/document-hygiene/SKILL.md`** — the actual procedure Claude follows when the reminder fires (or when you ask "clean up this doc," "is this still accurate," etc.): a preflight (mode, exemptions, ownership scope), then re-read the whole doc fresh, re-verify every factual claim against current evidence, reconcile contradictions, strip changelog narration, resolve stale TODOs, check structural integrity, then a deterministic `grep` scar-scan before reporting.
+
+### Modes: propose vs. apply
+
+- **propose** (default): Claude re-reads and re-verifies as usual but doesn't edit the doc. It presents a compact list of proposed changes (current text, proposed text, evidence) and waits for you to accept.
+- **apply**: Claude edits directly and reports only what actually needs a human: a contradicted decision you already acted on, a decision only you can make, a setting to change.
+
+Resolution order, first match wins: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`.
+
+Switch it:
+```bash
+# Project-level (this repo/folder only)
+mkdir -p .claude/.hygiene && echo apply > .claude/.hygiene/mode
+
+# Global (every project)
+mkdir -p ~/.claude/document-hygiene && echo apply > ~/.claude/document-hygiene/mode
+
+# One-off (this command only)
+DOCUMENT_HYGIENE_MODE=apply claude ...
+```
+Pick `apply` for solo work, where reviewing every proposal is pure overhead. Keep `propose` (the default) in a multi-agent folder or shared doc, where an unreviewed automatic edit is more disruptive than a short approval step.
+
+### Justified markers
+
+A `TODO`/`FIXME`/`XXX`/`HACK` written with an inline reason in parentheses, e.g. `TODO(keep until v2 ships)`, is treated as a deliberately kept marker, not a scar, and neither hook flags it. A bare `TODO` with no reason still counts as a scar candidate.
 
 ### Multi-agent / shared-folder safety
 
@@ -97,3 +123,7 @@ Nothing to invoke manually most of the time — the `Stop` hook reminds you auto
 - Claude Code with hooks support.
 - `jq` and `bash` (both hook scripts depend on `jq` for parsing the hook JSON payload).
 - `shasum` or `sha1sum` (used to key runtime state by project directory; `shasum` ships with macOS, `sha1sum` with most Linux distros). If neither is present the hooks fall back to a single shared state bucket.
+
+## Tests
+
+`tests/run.sh` is a self-contained regression suite for both hooks (it runs against a throwaway `HOME`, never your real state). Run it with `bash tests/run.sh`; it prints PASS/FAIL per case and exits non-zero on any failure.

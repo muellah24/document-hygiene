@@ -26,6 +26,21 @@ case "$SID" in
 esac
 DIR="$BASE/sessions/$SID"
 
+# Claude Code sets stop_hook_active=true when a Stop hook already fired for
+# this turn and the agent is continuing because of it. Per
+# code.claude.com/docs/en/hooks: "Parse the `stop_hook_active` field from the
+# JSON input and exit early if it's `true`", a pattern that exists precisely
+# to stop a Stop hook from re-triggering itself. Without it, cleanup edits
+# the agent makes in response to our own reminder get counted by
+# track-doc-edits.sh and fire this same reminder again.
+STOP_HOOK_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null)
+if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  case "$DIR" in
+    "$BASE/sessions/"?*) rm -rf "$DIR" 2>/dev/null ;;
+  esac
+  exit 0
+fi
+
 # Opportunistic cleanup: prune session buckets untouched for 3+ days so the
 # per-session directories can't accumulate forever.
 [ -d "$BASE/sessions" ] && find "$BASE/sessions" -mindepth 1 -maxdepth 1 -type d -mtime +3 -exec rm -rf {} + 2>/dev/null
@@ -60,13 +75,21 @@ is_exempt() {
   return 1
 }
 
+# Keep SCAR_REGEX identical to the copy in hooks/track-doc-edits.sh: both
+# hooks must treat the same text as a scar. A justified marker written as
+# TODO(<reason>)/FIXME(<reason>)/XXX(<reason>)/HACK(<reason>) is a
+# deliberately kept marker, not a scar, so it's stripped before the scan.
+SCAR_REGEX='correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'
+
 scarred=""
 if [ -f "$DIR/scarred-docs" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     is_exempt "$f" && continue
     [ -f "$f" ] || continue
-    if sed '/<!-- *authors/,/-->/d' "$f" 2>/dev/null | grep -qEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'; then
+    if sed '/<!-- *authors/,/-->/d' "$f" 2>/dev/null \
+         | sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' \
+         | grep -qEi "$SCAR_REGEX"; then
       scarred="$scarred $f"
     fi
   done < <(sort -u "$DIR/scarred-docs" 2>/dev/null)
@@ -83,11 +106,42 @@ if [ -f "$DIR/touched-docs" ]; then
   touched=$(printf '%s' "$touched" | sed -E 's/^ +//; s/ +$//')
 fi
 
-if [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; then
+# Resolution order, first match wins: env var, project file, global file,
+# default "propose". Any value other than the literal string "apply" is
+# treated as "propose".
+resolve_mode() {
+  m=""
+  if [ -n "${DOCUMENT_HYGIENE_MODE:-}" ]; then
+    m="$DOCUMENT_HYGIENE_MODE"
+  elif [ -f "$PROJECT_DIR/.claude/.hygiene/mode" ]; then
+    m=$(cat "$PROJECT_DIR/.claude/.hygiene/mode" 2>/dev/null)
+  elif [ -f "${HOME}/.claude/document-hygiene/mode" ]; then
+    m=$(cat "${HOME}/.claude/document-hygiene/mode" 2>/dev/null)
+  fi
+  m=$(printf '%s' "$m" | tr -d '[:space:]')
+  case "$m" in
+    apply) printf 'apply' ;;
+    *) printf 'propose' ;;
+  esac
+}
+MODE=$(resolve_mode)
+if [ "$MODE" = "apply" ]; then
+  mode_txt="Mode: apply (edit directly, report only what needs a human)."
+else
+  mode_txt="Mode: propose (list proposed changes and wait for approval; switch with \`echo apply > .claude/.hygiene/mode\`)."
+fi
+
+# Emit only when there is something left to act on. The raw edit count is
+# historical and can outlive the docs it counted (all of them since gained a
+# 'hygiene: ignore' marker, or were removed), so emitting on count alone
+# produces a reminder naming zero targets. Gate on the filtered `touched`
+# list instead: it must be non-empty, and either the threshold was hit or a
+# scar was found among what's left.
+if [ -n "$touched" ] && { [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; }; then
   msg="Document-hygiene check due: ${c} doc edit(s) since the last pass (this session only)."
   [ -n "$scarred" ] && msg="${msg} Drift/changelog markers found in: ${scarred}."
-  [ -n "$touched" ] && msg="${msg} Touched docs: ${touched}."
-  msg="${msg} These are only docs YOU edited this session. Skip any doc you did not author this session or that carries a 'hygiene: ignore' marker (another agent may own it). Otherwise run the document-hygiene skill on the rest: fact-check every claim against current evidence, delete stale/contradicted statements and changelog narration, and ensure each doc reads as a clean current version."
+  msg="${msg} Touched docs: ${touched}."
+  msg="${msg} These are only docs YOU edited this session. Skip any doc you did not author this session or that carries a 'hygiene: ignore' marker (another agent may own it). Otherwise run the document-hygiene skill on the rest: fact-check every claim against current evidence, delete stale/contradicted statements and changelog narration, and ensure each doc reads as a clean current version. ${mode_txt}"
 
   # Reset this session's cycle BEFORE emitting (prevents any Stop-hook recursion).
   # Defense in depth: never rm -rf outside the sessions root, even if SID
@@ -97,6 +151,16 @@ if [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; then
   esac
 
   jq -cn --arg ctx "$msg" '{hookSpecificOutput:{hookEventName:"Stop",additionalContext:$ctx}}' 2>/dev/null
+elif [ -z "$touched" ]; then
+  # Every touched doc got filtered out (all now exempt, or all gone): there
+  # is nothing left to name in a reminder, so reset the stale bucket
+  # silently instead of counting toward a future report with no targets.
+  case "$DIR" in
+    "$BASE/sessions/"?*) rm -rf "$DIR" 2>/dev/null ;;
+  esac
 fi
+# Else: below threshold, no scars, and at least one real target remains.
+# Leave the bucket in place so edits keep accumulating toward the threshold
+# across future Stop events in this session.
 
 exit 0

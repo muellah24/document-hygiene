@@ -11,6 +11,11 @@
 #                    blamed for each other's edits. Falls back to a "shared"
 #                    bucket when no session_id is present (backward compatible).
 #
+# A file inside the project directory is always tracked, even if the project
+# itself lives under /tmp or /var/folders (a sandbox or throwaway checkout).
+# The temp/cache exclusion only skips files OUTSIDE the project that happen
+# to sit under a temp/cache path.
+#
 # Storage split:
 #   - User config  (.claude/.hygiene/ignore) stays project-local & committable.
 #   - Runtime state lives OUTSIDE the repo under
@@ -39,12 +44,43 @@ case "$FP" in
   */.claude/*) exit 0 ;;
 esac
 
-# Skip OS temp/scratch/cache dirs — fetched-doc caches and agent scratchpads
-# (e.g. /var/folders/.../openai-docs-cache/*.md, /private/tmp/claude-*/...)
-# aren't a maintained deliverable and shouldn't inflate any project's counter.
-case "$FP" in
-  /tmp/*|/private/tmp/*|/var/folders/*|*/.cache/*) exit 0 ;;
+# Canonicalize a path's directory (resolves symlinks, ".."), falling back to
+# the raw string when the directory can't be resolved (e.g. it doesn't exist
+# yet). macOS has no `realpath` by default, so this uses `cd && pwd -P`
+# instead. Run in a subshell so it never changes the script's own cwd.
+canon_path() {
+  d=$(dirname "$1")
+  b=$(basename "$1")
+  resolved=$(cd "$d" 2>/dev/null && pwd -P)
+  if [ -n "$resolved" ]; then
+    printf '%s/%s\n' "$resolved" "$b"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+CANON_PROJECT_DIR=$(canon_path "$PROJECT_DIR")
+CANON_FP=$(canon_path "$FP")
+
+# A file inside the project directory is always eligible for tracking, even
+# if the project itself happens to live under /tmp (a sandbox or throwaway
+# checkout). The temp/cache exclusion below only applies to files OUTSIDE the
+# project: a fetched-doc cache or agent scratchpad the project pulled from,
+# not a file the project owns.
+case "$CANON_FP" in
+  "$CANON_PROJECT_DIR"|"$CANON_PROJECT_DIR"/*) IN_PROJECT=1 ;;
+  *) IN_PROJECT=0 ;;
 esac
+
+# Skip OS temp/scratch/cache dirs outside the project — fetched-doc caches
+# and agent scratchpads (e.g. /var/folders/.../openai-docs-cache/*.md,
+# /private/tmp/claude-*/...) aren't a maintained deliverable and shouldn't
+# inflate any project's counter.
+if [ "$IN_PROJECT" -eq 0 ]; then
+  case "$CANON_FP" in
+    /tmp/*|/private/tmp/*|/var/folders/*|*/.cache/*) exit 0 ;;
+  esac
+fi
 
 # Only track long-form documents (where drift accumulates).
 case "$FP" in
@@ -94,9 +130,15 @@ echo $((c + 1)) > "$DIR/edit-count"
 grep -qxF "$FP" "$DIR/touched-docs" 2>/dev/null || echo "$FP" >> "$DIR/touched-docs"
 
 # Flag drift / changelog "scars" present in the current file.
-# Strip the intentional `<!-- authors ... -->` metadata block first, so authorship
-# descriptions (e.g. "fact-checked", "corrected numbers") never trip scar detection.
-if [ -f "$FP" ] && sed '/<!-- *authors/,/-->/d' "$FP" 2>/dev/null | grep -qEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'; then
+# Keep SCAR_REGEX identical to the copy in hooks/check-doc-hygiene.sh: both
+# hooks must treat the same text as a scar.
+SCAR_REGEX='correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'
+# A justified marker written as TODO(<reason>)/FIXME(<reason>)/XXX(<reason>)/
+# HACK(<reason>) is a deliberately kept marker, not a scar, so strip those
+# before scanning: only a BARE marker (no parenthesized reason) should count.
+if [ -f "$FP" ] && sed '/<!-- *authors/,/-->/d' "$FP" 2>/dev/null \
+     | sed -E 's/(TODO|FIXME|XXX|HACK)\([^)]*\)//g' \
+     | grep -qEi "$SCAR_REGEX"; then
   grep -qxF "$FP" "$DIR/scarred-docs" 2>/dev/null || echo "$FP" >> "$DIR/scarred-docs"
 fi
 
