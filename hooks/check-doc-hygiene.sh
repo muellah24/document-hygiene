@@ -35,10 +35,53 @@ DIR="$BASE/sessions/$SID"
 THRESHOLD=5
 c=$(cat "$DIR/edit-count" 2>/dev/null || echo 0)
 
+# Re-check exemption against CURRENT file state before reporting — a file
+# recorded as touched/scarred at edit time may since have gained a
+# hygiene:ignore marker, matched a newly-added ignore glob, or been cleaned
+# up. Trusting the historical record instead of current truth is exactly the
+# drift this tool exists to prevent, so a report must not do it either.
+IGN="$PROJECT_DIR/.claude/.hygiene/ignore"
+is_exempt() {
+  f="$1"
+  [ -f "$f" ] || return 0
+  if head -n 25 "$f" 2>/dev/null | grep -qiE 'hygiene:[[:space:]]*(ignore|skip|collaborative|shared|audit|log)'; then
+    return 0
+  fi
+  if [ -f "$IGN" ]; then
+    bn=$(basename "$f")
+    while IFS= read -r pat || [ -n "$pat" ]; do
+      case "$pat" in ''|\#*) continue ;; esac
+      # shellcheck disable=SC2254
+      case "$bn" in $pat) return 0 ;; esac
+      # shellcheck disable=SC2254
+      case "$f" in $pat) return 0 ;; esac
+    done < "$IGN"
+  fi
+  return 1
+}
+
 scarred=""
-[ -f "$DIR/scarred-docs" ] && scarred=$(sort -u "$DIR/scarred-docs" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+if [ -f "$DIR/scarred-docs" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    is_exempt "$f" && continue
+    [ -f "$f" ] || continue
+    if sed '/<!-- *authors/,/-->/d' "$f" 2>/dev/null | grep -qEi 'correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK'; then
+      scarred="$scarred $f"
+    fi
+  done < <(sort -u "$DIR/scarred-docs" 2>/dev/null)
+  scarred=$(printf '%s' "$scarred" | sed -E 's/^ +//; s/ +$//')
+fi
+
 touched=""
-[ -f "$DIR/touched-docs" ] && touched=$(sort -u "$DIR/touched-docs" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+if [ -f "$DIR/touched-docs" ]; then
+  while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    is_exempt "$f" && continue
+    touched="$touched $f"
+  done < <(sort -u "$DIR/touched-docs" 2>/dev/null)
+  touched=$(printf '%s' "$touched" | sed -E 's/^ +//; s/ +$//')
+fi
 
 if [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; then
   msg="Document-hygiene check due: ${c} doc edit(s) since the last pass (this session only)."
