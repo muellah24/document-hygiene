@@ -2,63 +2,79 @@
 
 # Document Hygiene
 
-A Claude Code skill + hook pair that stops long-lived AI-written documents from drifting: it catches stale claims, self-contradictions, and changelog scar tissue, and forces a clean rewrite before you ship the doc.
+An AI agent editing a long document patches only the paragraph in front of it, so after weeks the plan, spec, or README it maintains contradicts itself and nobody notices. Document Hygiene is a Claude Code skill and hook pair that makes Claude re-read, re-verify, and reconcile the whole document when a session has edited it heavily. It proposes fixes by default (you approve them) and can be switched to apply them directly, with your git history as the only undo. It never blocks a session, stores no document content, and runs no external service. It's for anyone who runs a project with a goal and keeps a living document about it: product managers, project managers, product owners, scrum masters, founders, vibe coders, and engineers alike.
 
-For anyone who runs a project with a goal, keeps a living document about it, and uses AI to iterate on execution: product managers, project managers, product owners, scrum masters, founders, vibe coders. If you have a launch plan, a spec, a status report, or a README that gets edited over and over by an AI agent, that document is drifting right now and this tool is for you.
+![Document Hygiene](docs/document-hygiene-comic.jpg)
 
-![Document Hygiene](docs/document-hygiene-comic-FULL.jpg)
+[Full resolution](docs/document-hygiene-comic-FULL.jpg) · Explainer video: [`docs/document-hygiene-promo.mp4`](docs/document-hygiene-promo.mp4)
 
-Explainer video: [`docs/document-hygiene-promo.mp4`](docs/document-hygiene-promo.mp4)
+## What you get
 
-## Why this exists
+- **A reminder at the end of a turn**: the Stop hook checks, when a turn finishes, whether the session has made 5+ edits to a Markdown doc or left a scar marker (`corrected`, bare `TODO`, etc.) in one of them (docs that opted out don't count). Detection is not real time: nothing happens mid-turn, only at the end, when the Stop event fires.
+- **A disciplined reconciliation procedure**: on that reminder, Claude re-reads the whole document, re-verifies every claim against current evidence, fixes contradictions on both sides, and strips changelog narration.
+- **Safe defaults**: nothing is edited without your say-so unless you deliberately switch modes, and even then, only inside a git safety net.
 
-Short-lived docs don't drift: you write them once and move on. The ones that rot are the docs a project leans on for weeks: the spec, the plan, the architecture note, the README. Those get edited over and over.
+### Safety, in six lines
 
-When an AI agent edits a long doc, it does the economical thing: it rewrites the span the current task touches and leaves the rest alone. That's right for the immediate ask and wrong for the document: the model is patching the paragraph in front of it, not re-reading all 400 lines and reconciling them against reality. Do that fifty times and the doc becomes a sediment of half-updated truths.
+- Never blocks a session: it only reminds.
+- Stores no document content anywhere, only edit counts and file paths, under `~/.claude`.
+- Proposes changes by default; you approve them.
+- Apply mode edits only a doc that is saved in git with no pending changes (committed and clean), and prints the exact `git restore` command before touching it.
+- Any doc can opt out with a one-line marker.
+- Covered by a regression suite (see Tests).
 
-### How the scars accumulate
+## Why documents drift
+
+Short-lived docs don't drift: you write them once and move on. The ones that rot are the docs a project leans on for weeks: the spec, the plan, the architecture note, the README, edited over and over.
+
+When an AI agent edits a long doc, it does the economical thing: it rewrites the span the current task touches and leaves the rest alone. That's right for the immediate ask and wrong for the document: fifty patches later, the doc is a sediment of half-updated truths.
 
 Each project change lands as a *patch*, not a *rewrite*:
 
-- **A decision reverses.** You switch Postgres → DynamoDB in week three. "Data model" gets updated; "Overview" still says Postgres. Two sections disagree, nobody flags it.
-- **Something ships.** The plan still says *"Phase 3: blocked on the auth migration"* two weeks after that migration merged.
+- **A decision reverses.** You switch Postgres to DynamoDB in week three. "Data model" gets updated; "Overview" still says Postgres.
+- **A person leaves.** The launch plan still says Priya owns onboarding; Priya left in May.
 - **A thing gets renamed.** The install step calls `setup.sh`; the script is now `bootstrap.sh`. It wasn't wrong when written. The world moved.
-- **The edits narrate themselves.** The doc accumulates its own diff: *"corrected the endpoint (was /v1, now /v2)"*, *"earlier draft said 4 workers, now 8"*, burying the current answer under the story of how it changed.
+- **The edits narrate themselves.** The doc accumulates its own diff: "corrected the endpoint (was /v1, now /v2)", burying the current answer under the story of how it changed.
 
-Each was a locally-correct edit. Drift is what you get when they're never reconciled globally, and AI makes them fast and in volume, so it builds far quicker than in a human-only doc.
+A drifted doc is worse than no doc, because people and agents still trust it: one contradiction and the reader re-verifies everything by hand anyway, the next AI session inherits a stale claim and builds on it, and the longer it's left the more expensive the untangle.
 
-### Why it's worth pruning
-
-A drifted doc is worse than no doc, because people and agents still trust it:
-
-- **It stops being usable.** One contradiction and the reader stops trusting the whole file, then re-verifies everything against the code: the work the doc was meant to save.
-- **Agents inherit the lies.** The next AI session reads a stale *"we use Postgres"* as context and writes Postgres code. Wrong context in, wrong work out. Now the error is in the codebase.
-- **Drift compounds.** New edits are made against a half-wrong picture, so the longer it's left, the more expensive the untangle, until the doc gets abandoned and rewritten from scratch.
-
-Patching is not reconciling. This tool watches the sediment build up and forces a reconciliation pass: re-read the whole thing, re-verify every claim, fix both sides of each contradiction, strip the changelog scars, so the doc reads as one clean statement of what's true *now*.
+Patching is not reconciling. This tool watches the sediment build up and prompts a reconciliation pass: re-read the whole thing, re-verify every claim, fix both sides of each contradiction, strip the changelog scars.
 
 ## How it works
 
 Three pieces, all Claude Code native (no external service):
 
-1. **`hooks/track-doc-edits.sh`**: `PostToolUse` hook on `Edit|Write|MultiEdit`. Every time a `.md`/`.mdx` file is touched, it counts the edit and greps the file for scar markers (`corrected`, `reversed`, `TODO`, `⚠`, etc.). A file inside the project is always tracked, even if the project itself lives under `/tmp`; the temp/cache skip only applies to files outside the project. State is namespaced per Claude `session_id`, so concurrent agents/sessions never share counters or get blamed for each other's edits. Coverage is main-agent edits only: a subagent tool call (which carries its own `agent_id`) and a missing or malformed `session_id` are both skipped rather than tracked, since there's no shared bucket to misattribute them into.
-2. **`hooks/check-doc-hygiene.sh`**: `Stop` hook. When a session ends, if it made 5+ doc edits or any touched doc shows scar markers, it injects a reminder into context naming exactly which docs to reconcile, and states the current mode (see below). Exits silently, with no reminder, when `stop_hook_active` is true (Claude is already continuing because of this same hook) or when every touched doc turned out to be exempt. Only ever *reminds*, never blocks, and only reports on docs the current session itself edited.
-3. **`skills/document-hygiene/SKILL.md`**: the actual procedure Claude follows when the reminder fires (or when you ask "clean up this doc," "is this still accurate," etc.): a preflight (mode, exemptions, ownership scope, git recovery baseline), then re-read the whole doc fresh, re-verify every factual claim against current evidence, reconcile contradictions, strip changelog narration, resolve stale TODOs, check structural integrity, then a deterministic `grep` scar-scan (a review list, not an auto-delete list) before reporting.
+1. **`hooks/track-doc-edits.sh`** (`PostToolUse` on `Edit|Write|MultiEdit`): counts edits to touched `.md`/`.mdx`/`.markdown` files and flags scar markers in them, namespaced per Claude session so concurrent agents never share counters or get blamed for each other's edits.
+2. **`hooks/check-doc-hygiene.sh`** (`Stop` hook): when a session ends, if it made 5+ doc edits or hit a scar marker and at least one non-exempt doc remains in scope, injects a reminder naming exactly which docs to reconcile and the current mode.
+3. **`skills/document-hygiene/SKILL.md`**: the procedure Claude follows on that reminder, or on request ("clean up this doc", "is this still accurate"): re-read the whole doc, re-verify every claim, reconcile contradictions, strip changelog narration, resolve stale TODOs, check structural integrity, then a deterministic scar scan before reporting.
 
-### Modes: propose vs. apply
+### What a reminder looks like
+
+Example: apply mode, one doc edited 6 times this session with a leftover bare `TODO`, in a repo at `/Users/you/project`. The Stop hook injects this as additional context (wrapped below for readability; only the line break before `restore:` is a real one, from the hook's own output):
+
+```
+Document-hygiene check due: 6 doc edit(s) since the last pass (this session
+only). Drift/changelog markers found in:
+/Users/you/project/docs/launch-plan.md. Touched docs:
+/Users/you/project/docs/launch-plan.md. These are only docs YOU edited this
+session. Skip any doc you did not author this session or that carries a
+'hygiene: ignore' marker (another agent may own it). Otherwise run the
+document-hygiene skill on the rest: fact-check every claim against current
+evidence, delete stale/contradicted statements and changelog narration, so
+each doc reads as a clean current version. Mode: apply (edit directly; when
+nothing needs a human, reply with the single line 'Hygiene pass: ok' and
+nothing more).
+restore: git -C /Users/you/project restore --source=1a2b3c4d5e6f7089abcdef1234567890fedcba98 --worktree -- docs/launch-plan.md
+```
+
+Note the two path styles: `Touched docs` and `Drift/changelog markers found in` show the file path as Claude's tools recorded it (absolute); the restore command's target, after `--`, is repo-relative, because `git restore` expects a path relative to the repo root it's run against.
+
+## Modes
 
 - **propose** (default): Claude re-reads and re-verifies as usual but doesn't edit the doc. It presents a compact list of proposed changes (current text, proposed text, evidence) and waits for you to accept.
-- **apply**: Claude edits directly, but only for a doc that is committed and clean in git (tracked, not a symlink, no staged or unstaged changes); a doc that isn't gets proposed instead even though the session mode is apply. When nothing needs you, Claude replies with one line, `Hygiene pass: ok`; it writes more only for something that needs a human (a contradicted decision you already acted on, a decision only you can make, a setting to change) or something unusual in the pass.
+- **apply**: Claude edits directly, but only a doc that's committed and clean in git; anything else gets proposed instead even though the session mode is apply. When nothing needs you, Claude replies with one line, `Hygiene pass: ok`.
 
-Resolution order, first match wins: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Parsing fails closed: once a source is picked (the env var is set, or a mode file exists), an empty or malformed value there resolves to `propose` directly rather than falling through to a lower-priority source.
-
-### Recovery: git is the only undo
-
-This tool stores no document content anywhere, not even temporarily: no backup, no versioning, nothing under `~/.claude` beyond edit counts and file paths. Recovery relies entirely on your own git history. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit:
-```
-restore: git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>
-```
-A doc that isn't committed and clean is reported as `<doc>: not committed and clean, propose only` instead: it's edited only after you review and accept the change by hand.
+Resolution order, first match wins: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Parsing fails closed: once a source is picked (the env var is set, or a mode file exists), an empty or malformed value there resolves to `propose` directly, rather than falling through to a lower-priority source.
 
 Switch it:
 ```bash
@@ -73,35 +89,30 @@ DOCUMENT_HYGIENE_MODE=apply claude ...
 ```
 Pick `apply` for solo work, where reviewing every proposal is pure overhead. Keep `propose` (the default) in a multi-agent folder or shared doc, where an unreviewed automatic edit is more disruptive than a short approval step.
 
-### Justified markers
+### Recovery: git is the only undo
 
-A `TODO`/`FIXME`/`XXX`/`HACK` written with an inline reason in parentheses, e.g. `TODO(keep until v2 ships)`, is treated as a deliberately kept marker, not a scar, and neither hook flags it. A bare `TODO` with no reason still counts as a scar candidate.
-
-### Multi-agent / shared-folder safety
-
-- **Opt-out**: a doc can exempt itself with an inline `<!-- hygiene: ignore -->` marker in its first 25 lines (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`), or via glob patterns in `.claude/.hygiene/ignore` (one per line). The glob syntax is a subset of gitignore: shell globs matched against the basename, the project-relative path, and the absolute path; a pattern ending in `/` is a directory prefix (matches anything under it, e.g. `docs/audit/` or `docs/audit/*`); no negation, no `**`. Use this for audit logs, fact-check docs, or specs where words like "corrected" are the subject matter, not drift.
-- **Attribution**: runtime state is namespaced per Claude `session_id`, so in a folder touched by multiple agents (or Claude + Codex), a reminder only ever lists docs *that session* edited. Coverage is main-agent edits only: a subagent tool call's `agent_id` is detected and skipped rather than credited to the parent session. State lives outside the repo: under `~/.claude/document-hygiene/state/<project-hash>/sessions/<session_id>/`, keyed by a hash of the project directory, so ordinary markdown edits never create untracked bookkeeping files inside your project. The only project-local file is the optional user-authored `.claude/.hygiene/ignore` config, which is safe to commit.
-- **Hardening**: `session_id` is used to build a directory path that the Stop hook deletes with `rm -rf`, so both hooks sanitize it against a strict allowlist (rejecting path separators and `..`), and the Stop hook additionally refuses to delete anything outside its own `sessions/` root. A missing or malformed `session_id` is not tracked at all: there's no shared fallback bucket that could misattribute an edit or a reminder across sessions.
-- **Authorship stamp convention** (optional, recommended for shared docs): when substantially editing a doc other agents may also touch, prepend an HTML-comment authorship block at the top of the file, e.g.:
-  ```
-  <!-- authors (newest first):
-  - Claude Opus 4.8 · effort high · 2026-07-02 · drafted sections 1-4
-  -->
-  ```
-  The tracker strips this block before scanning for scars, so it's safe to leave in place: it won't trigger false-positive drift warnings.
+This tool stores no document content anywhere, not even temporarily: no backup, no versioning, nothing under `~/.claude` beyond edit counts and file paths. Recovery relies entirely on your own git history. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit:
+```
+restore: git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>
+```
+A doc that isn't committed and clean is reported as `<doc>: not committed and clean, propose only` instead: it's edited only after you review and accept the change by hand.
 
 ## Install
 
+Both hook scripts are short, plain bash (each under 250 lines); read them before wiring them in.
+
 1. Copy the skill:
-   ```
+   ```bash
    cp -r skills/document-hygiene ~/.claude/skills/document-hygiene
    ```
 2. Copy the hooks:
-   ```
+   ```bash
    cp hooks/track-doc-edits.sh hooks/check-doc-hygiene.sh ~/.claude/hooks/
    chmod +x ~/.claude/hooks/track-doc-edits.sh ~/.claude/hooks/check-doc-hygiene.sh
    ```
-3. Wire the hooks into `~/.claude/settings.json`: merge this into your existing `hooks` block (don't overwrite the file, just add/merge these two entries):
+3. Wire the hooks in. Pick a scope, project first:
+
+   **Project only (recommended to start)**: add this to `<project>/.claude/settings.json` (create the file if it doesn't exist), so the hooks run only in that project:
    ```json
    {
      "hooks": {
@@ -119,19 +130,71 @@ A `TODO`/`FIXME`/`XXX`/`HACK` written with an inline reason in parentheses, e.g.
      }
    }
    ```
-   Replace `/Users/<you>` with your actual home path. If you already have `PostToolUse`/`Stop` entries, add these as additional array items rather than replacing what's there.
+
+   **Every project**: add the same block to `~/.claude/settings.json` instead. The tracker then runs briefly on every Edit/Write in every project, exiting immediately for non-Markdown files.
+
+   Replace `/Users/<you>` with your home directory (`/Users/<name>` on macOS, `/home/<name>` on Linux). If the settings file already has `PostToolUse`/`Stop` entries, add these as additional array items rather than replacing what's there.
+
+   If you would rather not hand-edit JSON, paste the block into Claude Code and ask it to merge these two hook entries into the settings file for you.
 4. Restart Claude Code (or start a new session) so the hooks load.
 
-## Usage
+## Verify the install
 
-Nothing to invoke manually most of the time: the `Stop` hook reminds you automatically once a session has made 5+ edits to a long-form doc, or as soon as a scar marker shows up in one. You can also trigger the skill directly any time: ask Claude "clean up this doc" or "is this still accurate," or after you notice you just reversed/corrected a claim (drift clusters: the same stale claim is usually echoed elsewhere).
+1. From the cloned repo, run `bash tests/run.sh`: it confirms both hooks run correctly on this machine (a throwaway `HOME`, touches nothing real).
+2. Start a new Claude Code session and run `/hooks`: `PostToolUse` and `Stop` should each show at least one configured hook.
+3. End to end: ask Claude to create a scratch Markdown file containing a bare `TODO` line, then finish its turn. When it finishes, the Stop hook injects the reminder, and Claude should come back proposing to resolve or justify that `TODO` (in the default propose mode). Delete the scratch file afterward.
+
+## Uninstall
+
+1. Remove the two hook entries from wherever you added them (`~/.claude/settings.json` or `<project>/.claude/settings.json`).
+2. Delete the two hook files, the skill folder, and the runtime state and mode files:
+   ```bash
+   rm ~/.claude/hooks/track-doc-edits.sh ~/.claude/hooks/check-doc-hygiene.sh
+   rm -rf ~/.claude/skills/document-hygiene ~/.claude/document-hygiene
+   ```
+
+Nothing else was written anywhere, except any `.claude/.hygiene/` mode or ignore files you created yourself inside a project; remove those by hand if you want them gone.
+
+## Configuration
+
+- **Opt out a doc**: add `<!-- hygiene: ignore -->` (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`) in its first 25 lines.
+- **Opt out a path pattern**: list globs in `.claude/.hygiene/ignore`, one per line. A subset of gitignore syntax: shell globs matched against the basename, the project-relative path, and the absolute path; a pattern ending in `/` is a directory prefix (matches anything under it, e.g. `docs/audit/` or `docs/audit/*`); no negation, no `**`.
+- **Justified markers**: `TODO(<reason>)` (and `FIXME`/`XXX`/`HACK` the same way) is a deliberately kept marker, not a scar. A bare marker with no reason still counts as a scar candidate.
+- **Authorship stamp** (optional, for shared docs): prepend an HTML-comment block when substantially editing a doc other agents may also touch, e.g.:
+  ```
+  <!-- authors (newest first):
+  - Claude Opus 4.8 · effort high · 2026-07-02 · drafted sections 1-4
+  -->
+  ```
+  The tracker strips this block before scanning for scars, so it's safe to leave in place.
+
+## Multi-agent folders
+
+- **Attribution is per session**: a reminder only ever lists docs *that session* edited, never a concurrent agent's work.
+- **Main-agent edits only**: a subagent tool call carries its own `agent_id` and is skipped rather than credited to the parent session.
+- **State lives outside the repo**: under `~/.claude/document-hygiene/state/`, keyed by project and session, so ordinary markdown edits never leave untracked bookkeeping files inside your project.
+- **Hardened cleanup**: the session ID is sanitized against a strict allowlist before it's used to build the path the Stop hook deletes, and that deletion is fenced to its own state directory.
+
+## Limits
+
+- Markdown only: `.md`, `.mdx`, `.markdown`. Other formats aren't tracked.
+- The hooks only remind; the reconciliation itself depends on Claude following the skill correctly.
+- Coverage is main-agent edits only: subagent tool calls aren't tracked.
+- The recovery check needs git and a doc that's already committed and clean; anything else falls back to propose mode regardless of the session's mode setting.
+- Developed and tested on macOS and Linux shells (bash, jq); not on Windows.
+- The tracker hook starts a short bash process (using jq) on every Edit, Write, or MultiEdit tool call; it exits immediately for anything that is not a Markdown file. Git is invoked only by the Stop hook, and only in apply mode.
 
 ## Requirements
 
 - Claude Code with hooks support.
 - `jq` and `bash` (both hook scripts depend on `jq` for parsing the hook JSON payload).
-- `shasum` or `sha1sum` (used to key runtime state by project directory; `shasum` ships with macOS, `sha1sum` with most Linux distros). If neither is present the hooks fall back to a single shared state bucket.
+- `shasum` or `sha1sum` (used to key runtime state by project directory; `shasum` ships with macOS, `sha1sum` with most Linux distros). If neither is present, all projects share one state directory (still separated per session).
+- `git`, optional: only for the apply-mode recovery check; without it every doc is handled in propose mode.
 
 ## Tests
 
 `tests/run.sh` is a self-contained regression suite for both hooks (it runs against a throwaway `HOME`, never your real state). Run it with `bash tests/run.sh`; it prints PASS/FAIL per case and exits non-zero on any failure.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

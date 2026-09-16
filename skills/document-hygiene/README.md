@@ -2,65 +2,47 @@
 
 # Document Hygiene (skill)
 
-Keeps long-lived Markdown documents (plans, specs, reports, READMEs) free of stale claims, contradictions, and changelog narration. Re-reads the whole document, re-verifies every factual claim, fixes contradictions, and removes edit-history scar text ("corrected", "reversed", "TODO", etc.) so the document reads as one current, accurate version instead of a sediment of patches.
-
-For anyone maintaining a project doc with AI, not only engineers: product managers, project managers, product owners, scrum masters, founders, vibe coders. A launch plan, a spec, a status report all rot the same way a README does.
+Keeps a long-lived Markdown document (plan, spec, report, README) free of stale claims, contradictions, and changelog narration. Re-reads the whole document, re-verifies every claim, and reconciles it back into one clean, current version instead of a sediment of patches.
 
 ## What it does
 
-- **Preflight first** (Step 0 in SKILL.md): resolves the mode (fail-closed: malformed mode config resolves to propose, never apply), skips exempt docs, scopes automatic apply-mode edits to docs the agent created this session, and (apply mode only) confirms a git recovery baseline before touching anything.
 - Re-reads the full document instead of trusting a memory of it.
-- Re-verifies each factual claim against current evidence (a query, a fetch, a live check), including PM-shaped drift: owners, dates, scope, phase/dependency status, metrics and targets, decisions, counts, tool/file names.
+- Re-verifies each factual claim against current evidence, including PM-shaped drift: owners, dates, scope, phase/dependency status, metrics, decisions, counts, tool/file names.
 - Finds contradictions between sections and fixes both sides, not just the one flagged.
 - Deletes changelog-style narration ("was X, now Y, corrected on Z"): edit history belongs in version control, not inline.
-- Removes resolved TODO/FIXME/XXX markers; keeps only ones still real, with a reason. A marker written `TODO(<reason>)` is treated as deliberately kept, not a scar.
-- Checks that cross-references, numbering, and links still line up after edits.
-- Finishes with a deterministic `grep` scar-scan before reporting done.
+- Removes resolved TODO/FIXME/XXX markers; keeps only ones still real, with a reason (`TODO(<reason>)` is treated as deliberately kept).
+- Finishes with a deterministic `grep` scar scan before reporting done.
 
 Full step-by-step procedure: [SKILL.md](SKILL.md).
 
-## Modes
-
-- **propose** (default): lists proposed changes (current text, proposed text, evidence) and waits for approval before editing.
-- **apply**: edits directly, but only a doc that's committed and clean in git (tracked, not a symlink, no staged or unstaged changes); anything else gets proposed instead even though the session mode is apply. Replies `Hygiene pass: ok` when nothing needs a human, and expands only when something does.
-
-Resolution order: env var `DOCUMENT_HYGIENE_MODE` → `<project>/.claude/.hygiene/mode` → `~/.claude/document-hygiene/mode` → default `propose`. Parsing fails closed: once a source is picked (the env var is set, or a mode file exists), an empty or malformed value there resolves to `propose` rather than falling through to a lower-priority source. Switch with `echo apply > .claude/.hygiene/mode` (project) or `echo apply > ~/.claude/document-hygiene/mode` (global). Use `apply` solo; keep `propose` in a multi-agent or shared folder, where an unreviewed edit costs more than a short approval step.
-
-### Recovery: git is the only undo
-
-This tool stores no document content anywhere, not even temporarily: recovery relies entirely on your own git history. In apply mode, before touching a doc, Claude confirms it's committed and clean and states the exact undo command up front: `git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>`. A doc that isn't committed and clean is reported as `not committed and clean, propose only` and edited only after you review and accept the change by hand.
-
 ## When it runs
 
-- **Manually**: ask "clean up this doc", "is this still accurate", "remove the correction scars", or invoke it right after reversing/correcting a claim (drift clusters, so the same stale claim usually needs fixing elsewhere too).
-- **Automatically**: via a companion `Stop` hook that fires once a session has made 5+ edits to a `.md`/`.mdx` file, or as soon as a scar marker (`corrected`, `reversed`, `TODO`, `⚠`, …) shows up in one it touched.
+- **Manually**: ask "clean up this doc", "is this still accurate", "remove the correction scars", or invoke it right after reversing/correcting a claim.
+- **Automatically**: via a companion `Stop` hook that fires once a session has made 5+ edits to a `.md`/`.mdx` file, or as soon as a scar marker shows up in one.
 
-The automatic trigger needs the two hooks that live at the repo root (`hooks/track-doc-edits.sh`, `hooks/check-doc-hygiene.sh`): they are not part of this folder. Copying only `skills/document-hygiene/` gives you the skill for manual invocation; it will not fire on its own. Install the hooks too for automatic enforcement: see the [repo README](../../README.md#install).
+The automatic trigger needs the two hooks that live at the repo root (`hooks/track-doc-edits.sh`, `hooks/check-doc-hygiene.sh`); they are not part of this folder. Copying only this folder gives you manual invocation only.
 
-## Files in this folder
-
-| File | Purpose |
-|---|---|
-| `SKILL.md` | The procedure Claude follows. Its frontmatter `description` is also what makes Claude auto-select this skill for matching requests. |
-
-## Standalone install (skill only, no automatic trigger)
+## Install
 
 ```bash
 cp -r skills/document-hygiene ~/.claude/skills/document-hygiene
 ```
+For automatic triggering, also install the two hooks: see the [root README's Install section](../../README.md#install).
 
-## Implementation notes
+## Modes and safety
 
-- A document opts out of tracking with a top-of-file marker in its first 25 lines: `<!-- hygiene: ignore -->` (also accepts `skip`, `collaborative`, `shared`, `audit`, `log`), or via a project-level glob list at `.claude/.hygiene/ignore`. The glob syntax is a subset of gitignore: shell globs matched against the basename, the project-relative path, and the absolute path; a pattern ending in `/` is a directory prefix (matches anything under it, e.g. `docs/audit/` or `docs/audit/*`); no negation, no `**`. Use this for audit logs or specs where words like "corrected" are the subject matter, not drift.
-- A `TODO`/`FIXME`/`XXX`/`HACK` written as `TODO(<reason>)` is a justified, deliberately kept marker, not a scar: both hooks strip that pattern before scanning. A bare marker with no reason still counts.
-- A file inside the project is always tracked, even when the project itself lives under `/tmp` or `/var/folders`, or when the project root itself is a symlink; both paths are canonicalized before comparison so the temp/cache skip only fires for files genuinely outside the project.
-- Runtime tracking state (edit counts, touched/scarred docs) lives outside any project, at `~/.claude/document-hygiene/state/<project-hash>/sessions/<session_id>/`, never inside the repo being edited, and namespaced per session so concurrent agents don't share counters. Coverage is main-agent edits only: a subagent tool call carries its own `agent_id` and is skipped, and a missing or malformed `session_id` is skipped too, rather than either falling into a shared bucket.
-- The Stop hook exits without emitting when `stop_hook_active` is `true` (Claude Code is already continuing because this same Stop hook fired), so its own cleanup edits can't retrigger it.
-- The scar-scan (step 7 in `SKILL.md`) strips the `<!-- authors ... -->` block and justified markers first, then greps for the deterministic ground truth for "is this a candidate to review":
-  ```
-  correction|corrected|reversed|verified live|earlier draft|previously (said|claimed)|no longer (true|accurate)|now addressed|decisions logged|⚠|TODO|FIXME|XXX|HACK
-  ```
-  A hit is a lead, not a verdict: legitimate matches (frontmatter, code, quotations, research/decision sentences, the authors block itself) stay.
+- **propose** (default): lists proposed changes and waits for approval.
+- **apply**: edits directly, only a doc that's committed and clean in git (saved in git with no pending changes); switch with a one-line `.claude/.hygiene/mode` file.
+- Git is the only undo: apply mode names the exact `git restore` command before it edits anything.
+- No document content is stored anywhere, not even temporarily: only edit counts and file paths, under `~/.claude`.
+
+Details: [root README, Modes](../../README.md#modes) and [Recovery](../../README.md#recovery-git-is-the-only-undo).
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `SKILL.md` | The procedure Claude follows. Its frontmatter `description` is also what makes Claude auto-select this skill for matching requests. |
 
 ## Source
 

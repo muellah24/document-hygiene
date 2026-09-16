@@ -20,7 +20,7 @@ Long-lived artifacts drift: each turn patches the immediate ask and leaves old t
 It applies to any project doc kept alive across turns or days, not just code: a launch plan, a product spec, a status report, a project README. If you run a project with a goal and keep a living document about it, this is for you, whether you're a product manager, project manager, product owner, scrum master, founder, or a vibe coder keeping a plan file next to your code.
 
 ## When to run
-- The Stop-hook reminder fired (N+ doc edits, or drift markers detected).
+- The Stop-hook reminder fired (5+ doc edits, or drift markers detected).
 - Before presenting any maintained artifact as "done" or "updated".
 - Immediately after you reverse or correct a claim: drift clusters, so the same stale claim is usually echoed elsewhere in the doc.
 - A document has been edited many times across a long session or multiple days.
@@ -61,7 +61,7 @@ printf '%s\n' "$MODE"
 <!-- MODE_SNIPPET_END -->
 
 - **propose** (default): re-read and re-verify as usual, but do not edit the doc. Present a compact list of proposed changes (for each: current text, proposed text, and the evidence behind the change) and wait for the user to accept before applying anything.
-- **apply**: edit directly. Stay silent afterward unless something changes what the user must do (see step 9).
+- **apply**: edit directly. Afterwards reply with the single line `Hygiene pass: ok` unless something needs the user (see step 9).
 
 **(b) Skip exempt docs.** Skip any doc carrying a `hygiene: ignore`-style marker in its first 25 lines, or matching a glob in `<project>/.claude/.hygiene/ignore`. These are opted out deliberately (shared docs, audit logs, specs where "corrected" is the subject matter).
 
@@ -85,6 +85,8 @@ If all three hold, record the commit (`git rev-parse HEAD`) and the repo-relativ
 ```
 git -C <root> restore --source=<sha> --worktree -- <relative-path>
 ```
+When the pass was triggered by the Stop-hook reminder in apply mode, the reminder already lists this command per doc; reuse it rather than recomputing.
+
 If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
 
 ## Procedure
