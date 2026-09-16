@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Stop hook — document-hygiene reminder (per-session).
+# Stop hook: document-hygiene reminder (per-session).
 # Reads ONLY the current Claude session's hygiene bucket, so an agent is
-# reminded solely about docs IT edited — never a concurrent agent's work.
+# reminded solely about docs IT edited, never a concurrent agent's work.
 # Non-blocking: emits additionalContext only (never decision:block) and resets
 # its own bucket after firing, so it cannot recurse.
 #
@@ -50,7 +50,7 @@ fi
 THRESHOLD=5
 c=$(cat "$DIR/edit-count" 2>/dev/null || echo 0)
 
-# Re-check exemption against CURRENT file state before reporting — a file
+# Re-check exemption against CURRENT file state before reporting: a file
 # recorded as touched/scarred at edit time may since have gained a
 # hygiene:ignore marker, matched a newly-added ignore glob, or been cleaned
 # up. Trusting the historical record instead of current truth is exactly the
@@ -141,7 +141,7 @@ if [ -n "$touched" ] && { [ "$c" -ge "$THRESHOLD" ] || [ -n "$scarred" ]; }; the
   msg="Document-hygiene check due: ${c} doc edit(s) since the last pass (this session only)."
   [ -n "$scarred" ] && msg="${msg} Drift/changelog markers found in: ${scarred}."
   msg="${msg} Touched docs: ${touched}."
-  msg="${msg} These are only docs YOU edited this session. Skip any doc you did not author this session or that carries a 'hygiene: ignore' marker (another agent may own it). Otherwise run the document-hygiene skill on the rest: fact-check every claim against current evidence, delete stale/contradicted statements and changelog narration, and ensure each doc reads as a clean current version. ${mode_txt}"
+  msg="${msg} These are only docs YOU edited this session. Skip any doc you did not author this session or that carries a 'hygiene: ignore' marker (another agent may own it). Otherwise run the document-hygiene skill on the rest: fact-check every claim against current evidence, delete stale/contradicted statements and changelog narration, so each doc reads as a clean current version. ${mode_txt}"
 
   # Reset this session's cycle BEFORE emitting (prevents any Stop-hook recursion).
   # Defense in depth: never rm -rf outside the sessions root, even if SID

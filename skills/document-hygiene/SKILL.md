@@ -1,6 +1,6 @@
 ---
 name: document-hygiene
-description: Use when maintaining a long-lived document, plan, spec, report, README, or any artifact edited across multiple turns or days — to fact-check it against current evidence, remove stale or contradicted claims, and strip accumulated changelog/correction narration so it reads as a clean current version. Trigger on "clean up this doc", "is this still accurate", "remove the correction scars", a doc edited many times, after reversing/correcting any earlier claim, or when the automatic Stop-hook hygiene reminder fires.
+description: Use when maintaining a long-lived document, plan, spec, report, README, or any artifact edited across multiple turns or days: to fact-check it against current evidence, remove stale or contradicted claims, and strip accumulated changelog/correction narration so it reads as a clean current version. Trigger on "clean up this doc", "is this still accurate", "remove the correction scars", a doc edited many times, after reversing/correcting any earlier claim, or when the automatic Stop-hook hygiene reminder fires.
 ---
 
 <!-- hygiene: ignore --><!-- this skill documents the hygiene tool's own trigger vocabulary (corrected/reversed/TODO/etc.) as subject matter, not as drift in the doc itself -->
@@ -14,7 +14,7 @@ It applies to any project doc kept alive across turns or days, not just code: a 
 ## When to run
 - The Stop-hook reminder fired (N+ doc edits, or drift markers detected).
 - Before presenting any maintained artifact as "done" or "updated".
-- Immediately after you reverse or correct a claim — drift clusters, so the same stale claim is usually echoed elsewhere in the doc.
+- Immediately after you reverse or correct a claim: drift clusters, so the same stale claim is usually echoed elsewhere in the doc.
 - A document has been edited many times across a long session or multiple days.
 
 ## Step 0: Preflight
@@ -42,9 +42,9 @@ echo "${DOCUMENT_HYGIENE_MODE:-$(cat .claude/.hygiene/mode 2>/dev/null || cat ~/
 
 ## Procedure
 
-1. **Re-read the whole artifact fresh.** Do not trust your memory of what it says — open it and read it end to end. Drift hides in the sections you didn't touch this turn.
+1. **Re-read the whole artifact fresh.** Do not trust your memory of what it says: open it and read it end to end. Drift hides in the sections you didn't touch this turn.
 
-2. **Extract every factual claim and re-verify it against current evidence.** For each load-bearing statement (numbers, tool/system behavior, "X causes Y", "we do/don't have Z"): re-run the query, re-fetch the page, re-check the live state. **Strong confidence in an older claim is the cue to verify, not to skip** — a stale prior feels identical to a checked fact. (Pairs with the global "Verify Before Asserting" rule.)
+2. **Extract every factual claim and re-verify it against current evidence.** For each load-bearing statement (numbers, tool/system behavior, "X causes Y", "we do/don't have Z"): re-run the query, re-fetch the page, re-check the live state. **Strong confidence in an older claim is the cue to verify, not to skip**: a stale prior feels identical to a checked fact. (Pairs with the global "Verify Before Asserting" rule.)
 
    What drifts in project docs specifically, check each:
    - Owners and roles ("Priya owns onboarding" after Priya left the team).
@@ -58,9 +58,9 @@ echo "${DOCUMENT_HYGIENE_MODE:-$(cat .claude/.hygiene/mode 2>/dev/null || cat ~/
 
    Example (PM-flavored): a launch plan still lists "blocked on the payments API migration" two weeks after that migration shipped, so the reader plans around a dependency that no longer exists. Example (coding): a README's install step calls `setup.sh`; the script was renamed to `bootstrap.sh` months ago and nobody updated the doc.
 
-3. **Reconcile contradictions.** If two parts of the doc disagree, find ground truth and fix *both* — don't leave the reader to guess which is current.
+3. **Reconcile contradictions.** If two parts of the doc disagree, find ground truth and fix *both*: don't leave the reader to guess which is current.
 
-4. **Strip changelog / correction narration.** Remove edit-history scar tissue: "corrected", "reversed", "verified live on <date>", "an earlier draft claimed…", "⚠ correction", "now addressed", "(reversed 2026-..)", ✓-decision logs, and dated parentheticals that narrate *what changed*. The document states the **current truth**, not the story of its edits. If edit history matters, it belongs in version control or a separate CHANGELOG — not inline.
+4. **Strip changelog / correction narration.** Remove edit-history scar tissue: "corrected", "reversed", "verified live on <date>", "an earlier draft claimed…", "⚠ correction", "now addressed", "(reversed 2026-..)", ✓-decision logs, and dated parentheticals that narrate *what changed*. The document states the **current truth**, not the story of its edits. If edit history matters, it belongs in version control or a separate CHANGELOG, not inline.
 
 5. **Resolve stale markers.** Delete done TODO/FIXME/XXX; keep only ones still real, with a reason. A marker written as `TODO(<reason>)` (the marker immediately followed by a parenthesized reason, e.g. `TODO(keep until v2 ships)`) is a deliberately kept marker, not a scar; leave it. A bare `TODO`/`FIXME`/`XXX`/`HACK` with no reason attached is a scar candidate: resolve it or give it one.
 
@@ -72,12 +72,12 @@ echo "${DOCUMENT_HYGIENE_MODE:-$(cat .claude/.hygiene/mode 2>/dev/null || cat ~/
    ```
    Expect no matches. A `TODO(<reason>)`-style marker is stripped before the scan and is not a match to chase.
 
-8. **Fresh-reader test.** Would someone with zero session history read this as one coherent current document — no contradictions, no "wait, which claim is right?", no visible edit scars? If not, fix what they'd trip on.
+8. **Fresh-reader test.** Would someone with zero session history read this as one coherent current document: no contradictions, no "wait, which claim is right?", no visible edit scars? If not, fix what they'd trip on.
 
-9. **Report according to mode.** In **apply** mode: housekeeping is your job, not a status update — run the pass and say nothing about it by default. Surface something only when it changes what the reader does: a claim you fixed that contradicts advice they already acted on, a decision only they can make, or a setting they need to change. When you do surface it, lead with that, not with a summary of what you pruned. In **propose** mode: present the compact change list from Step 0(a) and stop; do not apply anything until the user accepts.
+9. **Report according to mode.** In **apply** mode: housekeeping is your job, not a status update: run the pass and say nothing about it by default. Surface something only when it changes what the reader does: a claim you fixed that contradicts advice they already acted on, a decision only they can make, or a setting they need to change. When you do surface it, lead with that, not with a summary of what you pruned. In **propose** mode: present the compact change list from Step 0(a) and stop; do not apply anything until the user accepts.
 
 ## Anti-patterns
 - Trusting your own summary of the doc instead of re-reading it.
 - "Fixing" only the section the user pointed at, leaving the same stale claim elsewhere.
 - Replacing a wrong claim with a *new* unverified claim (verify the replacement too).
-- Turning the doc into a changelog ("was X, now Y, corrected on Z") — that IS the scar.
+- Turning the doc into a changelog ("was X, now Y, corrected on Z"): that IS the scar.

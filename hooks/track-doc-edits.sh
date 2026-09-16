@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# PostToolUse(Edit|Write|MultiEdit) hook — document-hygiene drift tracker.
+# PostToolUse(Edit|Write|MultiEdit) hook: document-hygiene drift tracker.
 # Records edits to long-form docs (.md/.mdx) and scans each for "scar" markers
 # (changelog narration, stale-claim flags). Pure bookkeeping; never blocks.
 #
 # Multi-agent safe:
-#   L1  exemption  — skips docs that opt out via an inline `hygiene: ignore`
+#   L1  exemption  : skips docs that opt out via an inline `hygiene: ignore`
 #                    marker OR a per-project .claude/.hygiene/ignore glob list.
-#   L2  attribution — state is namespaced per Claude session_id, so concurrent
+#   L2  attribution: state is namespaced per Claude session_id, so concurrent
 #                    agents in the same folder never share counters or get
 #                    blamed for each other's edits. Falls back to a "shared"
 #                    bucket when no session_id is present (backward compatible).
@@ -38,7 +38,7 @@ BASE="${HOME}/.claude/document-hygiene/state/$PROJHASH"
 FP=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
 [ -z "$FP" ] && exit 0
 
-# Skip anything under a .claude/ dir (skills, hooks, commands, settings) —
+# Skip anything under a .claude/ dir (skills, hooks, commands, settings):
 # config, not drift-prone deliverables.
 case "$FP" in
   */.claude/*) exit 0 ;;
@@ -72,7 +72,7 @@ case "$CANON_FP" in
   *) IN_PROJECT=0 ;;
 esac
 
-# Skip OS temp/scratch/cache dirs outside the project — fetched-doc caches
+# Skip OS temp/scratch/cache dirs outside the project: fetched-doc caches
 # and agent scratchpads (e.g. /var/folders/.../openai-docs-cache/*.md,
 # /private/tmp/claude-*/...) aren't a maintained deliverable and shouldn't
 # inflate any project's counter.
