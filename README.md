@@ -91,7 +91,9 @@ Pick `apply` for solo work, where reviewing every proposal is pure overhead. Kee
 
 ### Recovery: git is the only undo
 
-This tool stores no document content anywhere, not even temporarily: no backup, no versioning, nothing under `~/.claude` beyond edit counts and file paths. Recovery relies entirely on your own git history. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit:
+This tool stores no document content anywhere, not even temporarily: no backup, no versioning, nothing under `~/.claude` beyond edit counts and file paths. Recovery relies entirely on your own git history.
+
+"Git" here means the local save-history inside your project folder (the hidden `.git` directory), not GitHub. Every commit is a snapshot kept on your own disk, and the undo below reads from that snapshot. GitHub is not involved: nothing is pushed, fetched, or read from any server. If a folder is not a git repository yet, or a doc in it has never been committed, apply mode leaves that doc in propose mode; a one-time `git init` and commit is all it takes to enable the automatic path, and you can ask Claude to do that for you. Before editing a doc in apply mode, the Stop-hook reminder (and the skill, run manually) confirm the doc is committed and clean, then name the exact command that undoes the edit:
 ```
 restore: git -C <repo-root> restore --source=<commit-sha> --worktree -- <path-relative-to-repo>
 ```
