@@ -28,10 +28,10 @@ For a single issue's blocking/related/duplicate relations (useful for the "decis
 `list_issues` returns `status` (the status name, e.g. `"Done"`) and `statusType` (the category, e.g. `"completed"`). Linear's `statusType` values map 1:1 onto the evaluator's `stateType` vocabulary (`backlog`, `unstarted`, `started`, `completed`, `canceled`); only the JSON key changes, from `status`/`statusType` to `state`/`stateType`. A `jq` transform from the raw `list_issues` result to `check-staleness`'s input shape:
 
 ```bash
-jq -n --slurpfile issues linear-issues.json --arg text "$(cat doc-content.md)" --arg updated "$DOC_UPDATED_AT" '
+jq -n --slurpfile pages linear-issues.json --arg text "$(cat doc-content.md)" --arg updated "$DOC_UPDATED_AT" '
 {
   doc: {text: $text, updatedAt: $updated},
-  issues: [ $issues[][] | {
+  issues: [ $pages[] | (if type == "array" then .[] else .issues[] end) | {
     id: .id,
     title: .title,
     state: .status,
@@ -43,7 +43,7 @@ jq -n --slurpfile issues linear-issues.json --arg text "$(cat doc-content.md)" -
 ' | bin/check-staleness
 ```
 
-(`linear-issues.json` holds the array(s) `list_issues` returned, one JSON array literal appended per page if the project needed more than one `cursor` page. `--slurpfile` reads a file of concatenated JSON values into a top-level array of them, so `$issues[][]` flattens correctly whether the file holds one page (a single array) or several (an array of arrays), confirmed empirically both ways: the same jq works whether you fetch once or loop on `cursor`. `doc-content.md` is the document's `content` field written to a file so `$(cat ...)` doesn't choke on a large body. Adjust the plumbing to whatever your harness makes convenient. `options.volumeThreshold` / `options.maxAgeDays` / `options.now` can be added to the top-level object; all three are optional.)
+(`linear-issues.json` holds one JSON value appended per page fetched in step 2, one page per line. The real Linear MCP `list_issues` result is an OBJECT per page, `{"issues": [...], "hasNextPage": false, ...}` (possibly with a cursor field alongside), not a bare array: this is the shape to expect from a live call, not an assumption. The jq above accepts both shapes per page regardless, `.issues[]` for the object form and `.[]` for a bare array, so the same recipe still works if a future server version, a different MCP implementation, or a hand-rolled REST fetch ever returns pages as bare arrays instead. `--slurpfile` reads a file of concatenated JSON values into a top-level array of them, so `$pages[]` iterates one page at a time whether the file holds one page or several. `doc-content.md` is the document's `content` field written to a file so `$(cat ...)` doesn't choke on a large body. Adjust the plumbing to whatever your harness makes convenient. `options.volumeThreshold` / `options.maxAgeDays` / `options.now` can be added to the top-level object; all three are optional.)
 
 ## 4. Delivering the result
 

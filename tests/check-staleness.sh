@@ -1140,6 +1140,169 @@ else
   fail "case20d: 'see https://x/TECH-1, TECH-2 done' fires T1 on TECH-2 only, TECH-1's clause stays clean (rc=$rc got: $out)"
 fi
 
+# --- case 21: FIX (BUG 1) reason de-duplication -------------------------------
+# When an issue id appears twice on one line (once as plain text, once again
+# inside a URL or a markdown link destination), T1 used to emit one identical
+# reason per raw regex match instead of one per (rule, issue, line). Each
+# variant below reproduces a different way the id can appear twice on the
+# same line; all three must yield exactly one T1 reason.
+
+check_dedup_variant() {
+  # check_dedup_variant <label> <doc_text_json_escaped>
+  label="$1"; text="$2"
+  json=$(printf '{"doc":{"text":"%s","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TECH-9","stateType":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-21T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}' "$text")
+  run_cs "$json"
+  n=$(jqget "$out" '.reasons | length')
+  issue=$(jqget "$out" '.reasons[0].issue // "none"')
+  fire=$(jqget "$out" '.fire')
+  if ok_success && [ "$fire" = "true" ] && [ "$n" = "1" ] && [ "$issue" = "TECH-9" ]; then
+    pass "case21 ($label): exactly one T1 reason despite the id appearing twice on the line"
+  else
+    fail "case21 ($label): exactly one T1 reason despite the id appearing twice on the line (rc=$rc n=$n got: $out)"
+  fi
+}
+check_dedup_variant "plain" "planned (TECH-9)\\n"
+check_dedup_variant "issue-href-tag" "planned (<issue href=\\\"https://x/issue/TECH-9/slug\\\">TECH-9</issue>)\\n"
+check_dedup_variant "markdown-link" "planned [TECH-9](https://x/issue/TECH-9/slug)\\n"
+
+# case21d: the plain (no-duplicate-id) variant still fires normally (negative
+# control: proves the dedup key is (rule, issue, line), not something cruder
+# that would suppress a genuinely single occurrence).
+json='{"doc":{"text":"planned (TECH-9)\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TECH-9","stateType":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-21T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
+run_cs "$json"
+n=$(jqget "$out" '.reasons | length')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$n" = "1" ]; then
+  pass "case21d: a single (non-duplicated) occurrence still fires exactly once"
+else
+  fail "case21d: a single (non-duplicated) occurrence still fires exactly once (rc=$rc n=$n got: $out)"
+fi
+
+# case21e: two DIFFERENT issues, each duplicated on their own line, each get
+# their own single reason (dedup key includes the issue, not just the line
+# text pattern).
+read -r -d '' CASE21E <<'EOF' || true
+{
+  "doc": {"text": "planned (<issue href=\"https://x/issue/TECH-1/slug\">TECH-1</issue>)\nplanned (<issue href=\"https://x/issue/TECH-2/slug\">TECH-2</issue>)\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [
+    {"id": "TECH-1", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-21T00:00:00Z"},
+    {"id": "TECH-2", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-21T00:00:00Z"}
+  ],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE21E"
+n=$(jqget "$out" '.reasons | length')
+ids=$(jqget "$out" '[.reasons[].issue] | sort | join(",")')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$n" = "2" ] && [ "$ids" = "TECH-1,TECH-2" ]; then
+  pass "case21e: two different duplicated-id lines each fire exactly once, on their own issue"
+else
+  fail "case21e: two different duplicated-id lines each fire exactly once, on their own issue (rc=$rc n=$n ids=$ids got: $out)"
+fi
+
+# --- case 22: real-shape Linear-style fixture (anonymised) -------------------
+# A blockquote "last updated" line, a status table with <issue> tags (each
+# tag carrying both an href with the id embedded in the URL AND the id as the
+# tag's own text, so several rows exercise the case-21 dedup fix directly),
+# and a "Planned / open" section that references two of the same issues again
+# without any status word. now=2026-09-25 keeps the doc only 2 days old, well
+# under the default 7-day maxAgeDays, so T3 must not fire even though the
+# project is active.
+
+read -r -d '' CASE22 <<'EOF' || true
+{
+  "doc": {
+    "text": "> **Last updated:** 2026-09-23, after <issue id=\"uuid\" href=\"https://example.com/issue/ABC-116/some-slug\">ABC-116</issue>.\n\n| # | Step | Status |\n|---|---|---|\n| 1 | Setup | not started |\n| 2 | Ingest | **live** (<issue id=\"uuid\" href=\"https://example.com/issue/ABC-116/some-slug\">ABC-116</issue>) |\n| 3 | Extract | planned (<issue id=\"uuid\" href=\"https://example.com/issue/ABC-117/some-slug\">ABC-117</issue>) |\n| 4 | Export | **live** (<issue id=\"uuid\" href=\"https://example.com/issue/ABC-90/some-slug\">ABC-90</issue>) |\n| 5 | Cleanup | planned (<issue id=\"uuid\" href=\"https://example.com/issue/ABC-86/some-slug\">ABC-86</issue>) |\n\n# Planned / open\n\n| # | Ticket |\n|---|---|\n| 1 | <issue id=\"uuid\" href=\"https://example.com/issue/ABC-86/some-slug\">ABC-86</issue> |\n| 2 | <issue id=\"uuid\" href=\"https://example.com/issue/ABC-117/some-slug\">ABC-117</issue> |\n",
+    "updatedAt": "2026-09-23T00:00:00Z"
+  },
+  "issues": [
+    {"id": "ABC-116", "stateType": "completed", "createdAt": "2026-08-01T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"},
+    {"id": "ABC-90", "stateType": "completed", "createdAt": "2026-08-01T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"},
+    {"id": "ABC-117", "stateType": "completed", "createdAt": "2026-08-01T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"},
+    {"id": "ABC-86", "stateType": "unstarted", "createdAt": "2026-08-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00Z"},
+    {"id": "ABC-120", "stateType": "unstarted", "createdAt": "2026-09-24T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"},
+    {"id": "ABC-122", "stateType": "backlog", "createdAt": "2026-09-24T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"},
+    {"id": "ABC-123", "stateType": "completed", "createdAt": "2026-09-24T00:00:00Z", "updatedAt": "2026-09-24T00:00:00Z"}
+  ],
+  "options": {"now": "2026-09-25T00:00:00Z"}
+}
+EOF
+run_cs "$CASE22"
+t1_count=$(jqget "$out" '[.reasons[] | select(.rule=="T1")] | length')
+t1_issue=$(jqget "$out" '[.reasons[] | select(.rule=="T1")][0].issue // "none"')
+t1_class=$(jqget "$out" '[.reasons[] | select(.rule=="T1")][0].detail // "" | capture("\\((?<c>[a-z]+)\\)").c // ""')
+t1_abc86=$(jqget "$out" '[.reasons[] | select(.rule=="T1" and .issue=="ABC-86")] | length')
+t4_ids=$(jqget "$out" '[.reasons[] | select(.rule=="T4") | .issue] | sort | join(",")')
+has_t2=$(jqget "$out" '[.reasons[] | select(.rule=="T2")] | length')
+has_t3=$(jqget "$out" '[.reasons[] | select(.rule=="T3")] | length')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] \
+   && [ "$t1_count" = "1" ] && [ "$t1_issue" = "ABC-117" ] && [ "$t1_class" = "unstarted" ] \
+   && [ "$t1_abc86" = "0" ] \
+   && [ "$t4_ids" = "ABC-120,ABC-122,ABC-123" ] \
+   && [ "$has_t2" = "1" ] && [ "$has_t3" = "0" ]; then
+  pass "case22: real-shape fixture fires exactly the expected T1/T2/T4 set, no T3, no T1 on ABC-86, un-id'd row attaches to nothing"
+else
+  fail "case22: real-shape fixture fires exactly the expected T1/T2/T4 set (rc=$rc t1_count=$t1_count t1_issue=$t1_issue t1_class=$t1_class t1_abc86=$t1_abc86 t4_ids=$t4_ids t2=$has_t2 t3=$has_t3 got: $out)"
+fi
+
+# --- case 23: linear.md's list_issues jq recipe accepts both page shapes ----
+# Extracts the jq program from the fenced code block in linear.md
+# programmatically (so the doc and this test cannot drift), then runs it
+# against three fixtures: a bare-array page, a {issues:[...],hasNextPage}
+# object page, and two concatenated object pages. Each result must be
+# accepted by bin/check-staleness (exit 0 or 1, never 2) and hold the
+# expected number of issues.
+
+LINEAR_MD="$REPO_ROOT/skills/document-hygiene/references/linear.md"
+LINEAR_START=$(grep -n -- "--slurpfile pages linear-issues.json" "$LINEAR_MD" | head -1 | cut -d: -f1)
+LINEAR_CLOSE=$(grep -n "^' | bin/check-staleness$" "$LINEAR_MD" | awk -F: -v s="$LINEAR_START" '$1>s {print $1; exit}')
+if [ -z "$LINEAR_START" ] || [ -z "$LINEAR_CLOSE" ]; then
+  fail "case23: could not locate linear.md's list_issues jq code block (doc structure changed?)"
+else
+  LINEAR_FILTER=$(sed -n "$((LINEAR_START+1)),$((LINEAR_CLOSE-1))p" "$LINEAR_MD")
+
+  RECIPE_TMP=$(mktemp -d)
+
+  # (i) one bare array page
+  printf '[{"id":"ABC-1","title":"t","status":"Done","statusType":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}]' \
+    > "$RECIPE_TMP/bare.json"
+  # (ii) one {issues:[...],hasNextPage:false} object page
+  printf '{"issues":[{"id":"ABC-2","title":"t2","status":"Todo","statusType":"unstarted","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}],"hasNextPage":false}' \
+    > "$RECIPE_TMP/object.json"
+  # (iii) two concatenated object pages
+  printf '{"issues":[{"id":"ABC-3","title":"t3","status":"Todo","statusType":"unstarted","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}],"hasNextPage":true,"cursor":"x"}\n{"issues":[{"id":"ABC-4","title":"t4","status":"Done","statusType":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"}],"hasNextPage":false}\n' \
+    > "$RECIPE_TMP/twopages.json"
+
+  run_recipe_case() {
+    # run_recipe_case <label> <fixture_file> <expected_issue_count>
+    rlabel="$1"; rfile="$2"; rexpect="$3"
+    rjson=$(jq -n --slurpfile pages "$rfile" --arg text "mentions ABC-1 ABC-2 ABC-3 ABC-4" --arg updated "2025-01-01T00:00:00Z" "$LINEAR_FILTER" 2>/tmp/case23_jqerr)
+    rjqrc=$?
+    if [ "$rjqrc" -ne 0 ]; then
+      fail "case23 ($rlabel): recipe jq itself failed ($(cat /tmp/case23_jqerr))"
+      return
+    fi
+    rcount=$(printf '%s' "$rjson" | jq '.issues | length')
+    printf '%s' "$rjson" | "$CS" >/dev/null 2>/tmp/case23_cserr
+    rcsrc=$?
+    if [ "$rcsrc" != "0" ] && [ "$rcsrc" != "1" ]; then
+      fail "case23 ($rlabel): bin/check-staleness rejected the recipe's output, exit $rcsrc: $(cat /tmp/case23_cserr)"
+      return
+    fi
+    if [ "$rcount" = "$rexpect" ]; then
+      pass "case23 ($rlabel): recipe accepts the page shape, $rexpect issue(s), bin/check-staleness exits $rcsrc"
+    else
+      fail "case23 ($rlabel): recipe accepts the page shape, $rexpect issue(s), bin/check-staleness exits $rcsrc (got issue count $rcount)"
+    fi
+  }
+  run_recipe_case "bare array page" "$RECIPE_TMP/bare.json" 1
+  run_recipe_case "object page with hasNextPage" "$RECIPE_TMP/object.json" 1
+  run_recipe_case "two concatenated object pages" "$RECIPE_TMP/twopages.json" 2
+
+  rm -rf "$RECIPE_TMP" /tmp/case23_jqerr /tmp/case23_cserr
+fi
 
 # --- summary ------------------------------------------------------------------
 

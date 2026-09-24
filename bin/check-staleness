@@ -77,6 +77,20 @@
 #       doc.updatedAt whose ID does not appear anywhere in the doc text
 #       (plain mentions and IDs embedded in a URL both count as a reference).
 #
+# Reason de-duplication: T1 id matching runs against the ORIGINAL unmasked
+# line (so an id embedded in a URL or a markdown link destination is still
+# found), which means the same id can produce two or more separate
+# occurrences on one line: once as plain text, once again inside the URL or
+# link destination. Left alone, this would report the identical T1 finding
+# (same issue, same clause, same classification) more than once for a single
+# line. T1 reasons are therefore de-duplicated by (rule, issue, line),
+# keeping the first occurrence and its original order. T1b does not need the
+# same treatment: it already groups occurrences by issue id and emits at most
+# one reason per group, so a duplicate occurrence on the same line cannot
+# produce a duplicate T1b reason. T2, T3, and T4 aggregate over issues (one
+# row per issue), never over per-line occurrences, so they cannot duplicate
+# this way either.
+#
 # Shared reference matcher: T1/T1b (via the clause scan) and T4 (the
 # whole-doc-text check) use the exact same matching rule, defined once: an
 # issue's id is escaped literally (no regex metacharacters interpreted),
@@ -532,13 +546,31 @@ def line_occurrences($doc; $issues):
       ]
   end;
 
+# Removes duplicate reasons that share the same (rule, issue, line) key,
+# keeping the FIRST occurrence and its original order (never a sort-based
+# dedup, which would reorder the list). Used by t1_reasons below: an issue id
+# that appears twice on one line (once in plain text, once again inside a
+# URL or a markdown link destination) produces two entries in $occurrences
+# for that line, since ID matching always runs against the ORIGINAL unmasked
+# line (see "Shared reference matcher" above) and therefore sees both the
+# plain-text match and the URL-embedded match as separate occurrences. Both
+# resolve to the identical reason (same id, same clause, same classification),
+# so without this dedup step T1 would report the same finding twice.
+def dedup_by_key(f):
+  reduce .[] as $x ({seen: {}, out: []};
+    ($x | f | tostring) as $k
+    | if (.seen | has($k)) then .
+      else {seen: (.seen + {($k): true}), out: (.out + [$x])}
+      end)
+  | .out;
+
 def t1_reasons($occurrences):
   [ $occurrences[]
     | select(.cls != null and .cls.class != null)
     | . as $occ
     | select((allowed_state_types($occ.cls.class) | index($occ.iss.stateType)) == null)
     | {rule: "T1", issue: $occ.id, detail: ("line says " + $occ.cls.word + " (" + $occ.cls.class + "), issue is " + $occ.iss.stateType), line: $occ.line}
-  ];
+  ] | dedup_by_key(.rule + "|" + .issue + "|" + .line);
 
 def t1b_reasons($occurrences; $doc_epoch):
   [ $occurrences
