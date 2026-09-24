@@ -848,6 +848,16 @@ else
   echo "SKIP: case31-35 (git not available)"
 fi
 
+# --- bin/check-staleness (PM-doc staleness trigger: T1/T1b, T2, T3, T4) -----
+# A separate script (its own PASS/FAIL lines, its own fixtures), run from here
+# so `bash tests/run.sh` stays the single entry point for the whole suite.
+
+if bash "$SCRIPT_DIR/check-staleness.sh"; then
+  :
+else
+  FAILS=$((FAILS + 1))
+fi
+
 # --- summary ------------------------------------------------------------------
 
 echo "----"

@@ -12,6 +12,7 @@ Keeps a long-lived Markdown document (plan, spec, report, README) free of stale 
 - Deletes changelog-style narration ("was X, now Y, corrected on Z"): edit history belongs in version control, not inline.
 - Removes resolved TODO/FIXME/XXX markers; keeps only ones still real, with a reason (`TODO(<reason>)` is treated as deliberately kept).
 - Finishes with a deterministic `grep` scar scan before reporting done.
+- Also covers a project doc that lives inside Linear, Jira, or another tracker instead of a file: opt-in via a `hygiene: watch` marker, triggered by `bin/check-staleness` (four deterministic rules over the doc's `updatedAt` and the linked issues), always propose-only, delivered as a comment. See the root README's [Living docs inside Linear, Jira and other trackers](../../README.md#living-docs-inside-linear-jira-and-other-trackers).
 
 Full step-by-step procedure: [SKILL.md](SKILL.md).
 
@@ -43,6 +44,9 @@ Details: [root README, Modes](../../README.md#modes) and [Recovery](../../README
 | File | Purpose |
 |---|---|
 | `SKILL.md` | The procedure Claude follows. Its frontmatter `description` is also what makes Claude auto-select this skill for matching requests. |
+| `references/linear.md`, `references/jira.md`, `references/generic.md` | Per-tool recipes for the PM-doc path: how to fetch a doc and its issues, map the tool's own status vocabulary onto `stateType`, and deliver a proposal as a comment. |
+
+`bin/check-staleness`, the PM-doc trigger evaluator these recipes feed into, lives at the repo root (`../../bin/check-staleness`), not inside this skill folder; copying only `skills/document-hygiene/` gives you the reconciliation procedure but not that script (see the root README's Install section).
 
 ## Source
 

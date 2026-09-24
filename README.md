@@ -48,6 +48,8 @@ Three pieces, all Claude Code native (no external service):
 2. **`hooks/check-doc-hygiene.sh`** (`Stop` hook): when a session ends, if it made 5+ doc edits or hit a scar marker and at least one non-exempt doc remains in scope, injects a reminder naming exactly which docs to reconcile and the current mode.
 3. **`skills/document-hygiene/SKILL.md`**: the procedure Claude follows on that reminder, or on request ("clean up this doc", "is this still accurate"): re-read the whole doc, re-verify every claim, reconcile contradictions, strip changelog narration, resolve stale TODOs, check structural integrity, then a deterministic scar scan before reporting.
 
+These three are for a document that's a file. A project doc that lives inside Linear, Jira, or another tracker instead has no PostToolUse/Stop hook to trigger from (there's no file edit to catch) and uses a separate, opt-in, propose-only path: see [Living docs inside Linear, Jira and other trackers](#living-docs-inside-linear-jira-and-other-trackers) below.
+
 ### What a reminder looks like
 
 Example: apply mode, one doc edited 6 times this session with a leftover bare `TODO`, in a repo at `/Users/you/project`. The Stop hook injects this as additional context (wrapped below for readability; only the line break before `restore:` is a real one, from the hook's own output):
@@ -114,11 +116,15 @@ Both hook scripts are short, plain bash (each under 250 lines); read them before
    mkdir -p ~/.claude/skills ~/.claude/hooks
    cp -r skills/document-hygiene ~/.claude/skills/document-hygiene
    ```
-2. Copy the hooks:
+2. Copy the hooks, and `bin/check-staleness` if you'll use the Linear/Jira/other-tracker path (see [Living docs inside Linear, Jira and other trackers](#living-docs-inside-linear-jira-and-other-trackers)):
    ```bash
    cp hooks/track-doc-edits.sh hooks/check-doc-hygiene.sh ~/.claude/hooks/
    chmod +x ~/.claude/hooks/track-doc-edits.sh ~/.claude/hooks/check-doc-hygiene.sh
+   mkdir -p ~/.claude/bin
+   cp bin/check-staleness ~/.claude/bin/check-staleness
+   chmod +x ~/.claude/bin/check-staleness
    ```
+   `bin/check-staleness` has no hook to wire: nothing in `settings.json` calls it. The skill invokes it by path when a PM-doc check runs (manually, or from whatever schedule you set up per the reference for your tool); copying it next to the hooks just keeps everything the skill needs in one place.
 3. Wire the hooks in. Pick a scope, project first:
 
    **Project only (recommended to start)**: add this to `<project>/.claude/settings.json` (create the file if it doesn't exist), so the hooks run only in that project:
@@ -152,15 +158,24 @@ Both hook scripts are short, plain bash (each under 250 lines); read them before
 1. From the cloned repo, run `bash tests/run.sh`: it confirms both hooks run correctly on this machine (a throwaway `HOME`, touches nothing real).
 2. Start a new Claude Code session and run `/hooks`: `PostToolUse` and `Stop` should each show at least one configured hook.
 3. End to end: ask Claude to create a scratch Markdown file containing a bare `TODO` line, then finish its turn. When it finishes, the Stop hook injects the reminder, and Claude should come back proposing to resolve or justify that `TODO` (in the default propose mode). Delete the scratch file afterward.
+4. If you copied `bin/check-staleness` (the Linear/Jira/other-tracker path), confirm it runs standalone, no tracker or scheduler required:
+   ```bash
+   printf '%s' '{"doc":{"text":"- TECH-1: planned","updatedAt":"2026-09-01"},
+   "issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-01-01","updatedAt":"2026-09-10"}]}' \
+     | ~/.claude/bin/check-staleness
+   ```
+   It should print a JSON result with `"fire":true` (this sample doc calls a completed ticket "planned").
 
 ## Uninstall
 
 1. Remove the two hook entries from wherever you added them (`~/.claude/settings.json` or `<project>/.claude/settings.json`).
-2. Delete the two hook files, the skill folder, and the runtime state and mode files:
+2. Delete the two hook files, `bin/check-staleness` if you copied it, the skill folder, and the runtime state and mode files:
    ```bash
    rm ~/.claude/hooks/track-doc-edits.sh ~/.claude/hooks/check-doc-hygiene.sh
+   rm -f ~/.claude/bin/check-staleness
    rm -rf ~/.claude/skills/document-hygiene ~/.claude/document-hygiene
    ```
+   Also remove any scheduled task, webhook, or automation rule you set up for a PM-doc check (see [Living docs inside Linear, Jira and other trackers](#living-docs-inside-linear-jira-and-other-trackers)): those live in whichever host you wired them into, not under `~/.claude`, so this tool can't remove them for you.
 
 Nothing else was written anywhere, except any `.claude/.hygiene/` mode or ignore files you created yourself inside a project; remove those by hand if you want them gone.
 
@@ -202,9 +217,38 @@ The automatic reminder (the two hooks) is Claude Code specific today; the reconc
 
 Adapters are not part of this repo yet; the first one, if any, would be Cursor. Open an issue if you want one.
 
+## Living docs inside Linear, Jira and other trackers
+
+A project's "current state" doc can live inside a project-management tool instead of a file: a Linear project document, a Jira or Confluence page, a Notion database entry. Those drift the same way a Markdown file does, just against a different kind of evidence. A real (anonymized) example, found within 30 hours of the doc's own last edit: a Linear project document still listed one ticket as "planned" and another as "not started" after the first had shipped and the second had moved to in progress, and named none of five tickets created since the doc was last touched.
+
+There's no file edit to hook here, so this path is separate from the three pieces above: opt-in, and checked manually or on a schedule, not automatically on every edit.
+
+- **Opt-in marker**: a PM doc is checked only when it carries a `hygiene: watch` marker (a plain visible line of text in its first 25 lines, since most PM editors strip HTML comments, unlike the `hygiene: ignore` marker above) or on explicit request.
+- **The trigger, `bin/check-staleness`** (bash and `jq`, no other dependency, no network call): four deterministic rules over the doc's own `updatedAt` and the linked issues' statuses and dates decide whether a pass is due. Input is validated strictly before any rule runs (exit 2, one stderr line per violation): `issues` must be present and an array (empty is valid; missing/null/false is not), every id must match `^[A-Za-z][A-Za-z0-9_]*-[0-9]+$`, every stateType must be one of the five below, and every timestamp is calendar-checked up front.
+
+  | Rule | Fires when |
+  |---|---|
+  | T1 (status mismatch) | An issue ID referenced in the doc text whose current status disagrees with the status wording in the same CLAUSE as the ID (a line splits into clauses at `,` `;` `\|` `.` and table cell borders). |
+  | T1b (weaker: silent drift) | A referenced issue updated after the doc, now started or completed, with no status word (not even an ambiguous one) at all on any line that mentions it. |
+  | T2 (volume) | At least 5 (configurable) issues updated after the doc's own `updatedAt`. |
+  | T3 (age) | The doc is older than 7 days (configurable) while the project is still active. |
+  | T4 (unreferenced new work) | Issues created after the doc's `updatedAt` whose ID never appears in the doc text. |
+
+  Try it without any tracker or scheduler, piping a three-line sample straight in:
+  ```bash
+  printf '%s' '{"doc":{"text":"- TECH-1: planned","updatedAt":"2026-09-01"},
+  "issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-01-01","updatedAt":"2026-09-10"}]}' \
+    | bin/check-staleness
+  ```
+- **Propose only, delivered as a comment**: there's no git undo for a Linear document or a Jira issue, so this path never edits the doc. The reconciliation runs in propose mode always, and the result goes out as a comment on the document or project, for a human to review and apply.
+- **Duplicate comments are skipped**: before posting, a fingerprint (12 hex characters of a SHA-256 of the doc's `updatedAt` plus the sorted, unique `rule:issue` pairs the trigger returned) is appended to the comment as `hygiene-fingerprint: <hash>`, and a run whose fingerprint already appears in an existing comment posts nothing new. Running the check on a schedule and posting a comment are two separate authorisations; neither implies the other.
+- **Scheduling is offered, never created unasked**: wiring the check to a clock or an event (a scheduled task, a webhook, an agent mention) is host-specific. The first manual run for a given project offers to set one up and waits for a yes.
+
+Recipes for turning a specific tool's API into `bin/check-staleness`'s input: [`references/linear.md`](skills/document-hygiene/references/linear.md), [`references/jira.md`](skills/document-hygiene/references/jira.md), and [`references/generic.md`](skills/document-hygiene/references/generic.md) for any other tool. `bin/check-staleness` itself is covered by the same regression suite as the two hooks (see Tests, below).
+
 ## Limits
 
-- Markdown only: `.md`, `.mdx`, `.markdown`. Other formats aren't tracked.
+- Markdown only for the automatic hooks: `.md`, `.mdx`, `.markdown`. Other file formats aren't tracked. A living doc inside a PM tool isn't a file at all and uses the separate, opt-in path described above.
 - The hooks only remind; the reconciliation itself depends on Claude following the skill correctly.
 - Coverage is main-agent edits only: subagent tool calls aren't tracked.
 - The recovery check needs git and a doc that's already committed and clean; anything else falls back to propose mode regardless of the session's mode setting. A folder that isn't a git repository at all works in propose mode with no setup: the reminder names that as the specific reason and offers to set git up for you (see Recovery above).
@@ -221,10 +265,11 @@ Adapters are not part of this repo yet; the first one, if any, would be Cursor. 
 - Recommended: `shasum` or `sha1sum` (macOS has shasum, most Linux distros have sha1sum). Without either, all projects share one state directory, still separated per session.
 - Optional: git 2.23 or newer, for the apply-mode recovery check and the `git restore` undo command. Without git every doc is handled in propose mode; project-root detection falls back to the current directory.
 - Running the tests additionally needs awk, mktemp, ln, tr, wc; the YAML check uses Ruby or Python 3 with PyYAML if present, otherwise it is skipped.
+- `bin/check-staleness` (the Linear/Jira/other-tracker path) needs only bash and `jq` 1.6 or newer built with regex support (Oniguruma; the default build for any jq 1.6+ package) AND regex match offsets counted in Unicode codepoints, not bytes; jq 1.7+ is confirmed good, and some older 1.6.x builds on some platforms may report byte offsets and get rejected. No git, no network access, no other tool: it reads JSON on stdin and writes JSON to stdout. It checks its own jq build's regex support, lookaround support, and match-offset behavior on startup and exits with a clear message instead of failing deep inside the filter (or silently misreading a line with a non-ASCII character) if any of those is missing.
 
 ## Tests
 
-`tests/run.sh` is a self-contained regression suite for both hooks (it runs against a throwaway `HOME`, never your real state). Run it with `bash tests/run.sh`; it prints PASS/FAIL per case and exits non-zero on any failure.
+`tests/run.sh` is a self-contained regression suite for both hooks and for `bin/check-staleness` (it runs against a throwaway `HOME`, never your real state). Run it with `bash tests/run.sh`; it prints PASS/FAIL per case and exits non-zero on any failure.
 
 ## License
 
