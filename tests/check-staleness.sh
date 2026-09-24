@@ -10,7 +10,7 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
-CS="$REPO_ROOT/bin/check-staleness"
+CS="${CHECK_STALENESS_BIN:-$REPO_ROOT/bin/check-staleness}"
 
 FAILS=0
 pass() { printf 'PASS: %s\n' "$1"; }
@@ -99,7 +99,8 @@ read -r -d '' CASE2 <<'EOF' || true
 EOF
 run_cs "$CASE2"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case2: current doc does not fire"
 else
   fail "case2: current doc does not fire (rc=$rc got: $out)"
@@ -115,9 +116,10 @@ check_t1_class() {
   rule=$(jqget "$out" '.reasons[0].rule // "none"')
   issue=$(jqget "$out" '.reasons[0].issue // "none"')
   detail=$(jqget "$out" '.reasons[0].detail // ""')
+  fire=$(jqget "$out" '.fire')
   class_ok=1
   [ -n "$expect_class" ] && { printf '%s' "$detail" | grep -qF "($expect_class)" || class_ok=0; }
-  if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$class_ok" = "1" ]; then
+  if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$class_ok" = "1" ]; then
     pass "case3 ($label): '$word' vs stateType=$state fires T1 (issue=TICK-1, detail names the class)"
   else
     fail "case3 ($label): '$word' vs stateType=$state fires T1 (rc=$rc got: $out)"
@@ -144,7 +146,8 @@ done
 json='{"doc":{"text":"- TICK-1: later\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"unstarted","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-19T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
 run_cs "$json"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case3b: 'later' is no longer a recognized status word (dropped per FIX F4)"
 else
   fail "case3b: 'later' is no longer a recognized status word (dropped per FIX F4) (rc=$rc got: $out)"
@@ -154,7 +157,8 @@ fi
 json='{"doc":{"text":"- TICK-1: not started\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"unstarted","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-19T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
 run_cs "$json"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case3c: 'not started' vs a genuinely unstarted issue does not fire"
 else
   fail "case3c: 'not started' vs a genuinely unstarted issue does not fire (rc=$rc got: $out)"
@@ -168,7 +172,8 @@ rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
 n=$(jqget "$out" '.reasons | length')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$n" = "1" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$n" = "1" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
   pass "case3d: 'not started' vs a started issue fires T1 once on TICK-1, classified unstarted (not ambiguous)"
 else
   fail "case3d: 'not started' vs a started issue fires T1 once on TICK-1, classified unstarted (not ambiguous) (rc=$rc got: $out)"
@@ -184,7 +189,8 @@ rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
 n=$(jqget "$out" '.reasons | length')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$n" = "1" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$n" = "1" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
   pass "case3e: 'not yet started' vs a completed issue fires T1 once on TICK-1, classified unstarted (not ambiguous)"
 else
   fail "case3e: 'not yet started' vs a completed issue fires T1 once on TICK-1, classified unstarted (not ambiguous) (rc=$rc got: $out)"
@@ -202,7 +208,8 @@ EOF
 run_cs "$CASE4"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
-if ok_success && [ "$rule" = "T1b" ] && [ "$issue" = "TICK-9" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1b" ] && [ "$issue" = "TICK-9" ]; then
   pass "case4: no status word + issue updated after doc fires T1b on TICK-9"
 else
   fail "case4: no status word + issue updated after doc fires T1b on TICK-9 (rc=$rc got: $out)"
@@ -219,7 +226,8 @@ read -r -d '' CASE4B <<'EOF' || true
 EOF
 run_cs "$CASE4B"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case4b: T1b suppressed when another line about the same issue has a matching status word"
 else
   fail "case4b: T1b suppressed when another line about the same issue has a matching status word (rc=$rc got: $out)"
@@ -236,7 +244,8 @@ read -r -d '' CASE4C <<'EOF' || true
 EOF
 run_cs "$CASE4C"
 n=$(jqget "$out" '[.reasons[] | select(.rule=="T1b")] | length')
-if ok_success && [ "$n" = "1" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$n" = "1" ]; then
   pass "case4c: T1b fires exactly once per issue, not once per referencing line"
 else
   fail "case4c: T1b fires exactly once per issue, not once per referencing line (rc=$rc count=$n, out=$out)"
@@ -258,7 +267,8 @@ read -r -d '' CASE4D <<'EOF' || true
 EOF
 run_cs "$CASE4D"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case4d: T1b stays line-scoped (a status word elsewhere on the line suppresses it, even across a clause boundary)"
 else
   fail "case4d: T1b stays line-scoped (a status word elsewhere on the line suppresses it, even across a clause boundary) (rc=$rc got: $out)"
@@ -280,7 +290,8 @@ issues5=$(build_issues 5)
 json=$(printf '{"doc":{"text":"nothing here\\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":%s,"options":{"now":"2026-09-24T00:00:00Z"}}' "$issues5")
 run_cs "$json"
 has_t2=$(jqget "$out" '[.reasons[] | select(.rule=="T2")] | length')
-if ok_success && [ "$has_t2" = "1" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$has_t2" = "1" ]; then
   pass "case5: 5 issues updated since doc meets the default volume threshold"
 else
   fail "case5: 5 issues updated since doc meets the default volume threshold (rc=$rc got: $out)"
@@ -290,7 +301,8 @@ issues4=$(build_issues 4)
 json=$(printf '{"doc":{"text":"nothing here\\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":%s,"options":{"now":"2026-09-24T00:00:00Z"}}' "$issues4")
 run_cs "$json"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case5b: 4 issues (below threshold) does not fire"
 else
   fail "case5b: 4 issues (below threshold) does not fire (rc=$rc got: $out)"
@@ -307,7 +319,8 @@ read -r -d '' CASE6A <<'EOF' || true
 EOF
 run_cs "$CASE6A"
 has_t3=$(jqget "$out" '[.reasons[] | select(.rule=="T3")] | length')
-if ok_success && [ "$has_t3" = "1" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$has_t3" = "1" ]; then
   pass "case6a: old doc + active project fires T3"
 else
   fail "case6a: old doc + active project fires T3 (rc=$rc got: $out)"
@@ -322,7 +335,8 @@ read -r -d '' CASE6B <<'EOF' || true
 EOF
 run_cs "$CASE6B"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case6b: old doc + inactive project does not fire"
 else
   fail "case6b: old doc + inactive project does not fire (rc=$rc got: $out)"
@@ -346,7 +360,8 @@ EOF
 run_cs "$CASE7"
 fire=$(jqget "$out" '.fire')
 counts=$(jqget "$out" '.counts.changedSinceDoc, .counts.newUnreferenced' | tr '\n' ' ')
-if ok_success && [ "$fire" = "false" ] && [ "$counts" = "0 0 " ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$counts" = "0 0 " ] && [ "$nreasons" = "0" ]; then
   pass "case7: canceled issues are excluded from T2/T4 counts and don't fire"
 else
   fail "case7: canceled issues are excluded from T2/T4 counts and don't fire (rc=$rc fire=$fire counts='$counts' out=$out)"
@@ -365,7 +380,8 @@ run_cs "$CASE8"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1317" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1317" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
   pass "case8: an ID embedded in a URL is matched and classified (TECH-1317, unstarted)"
 else
   fail "case8: an ID embedded in a URL is matched and classified (TECH-1317, unstarted) (rc=$rc got: $out)"
@@ -381,7 +397,9 @@ read -r -d '' CASE8B <<'EOF' || true
 EOF
 run_cs "$CASE8B"
 newunref=$(jqget "$out" '.counts.newUnreferenced')
-if ok_success && [ "$newunref" = "0" ]; then
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$newunref" = "0" ] && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case8b: an ID inside a URL counts as referenced for T4"
 else
   fail "case8b: an ID inside a URL counts as referenced for T4 (rc=$rc got: $out)"
@@ -400,7 +418,8 @@ EOF
 run_cs "$CASE8C"
 fire=$(jqget "$out" '.fire')
 newunref=$(jqget "$out" '.counts.newUnreferenced')
-if ok_success && [ "$newunref" = "0" ] && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$newunref" = "0" ] && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case8c: a lowercased ID inside a URL still counts as referenced for T4 (no fire)"
 else
   fail "case8c: a lowercased ID inside a URL still counts as referenced for T4 (no fire) (rc=$rc got: $out)"
@@ -418,7 +437,8 @@ read -r -d '' CASE8D <<'EOF' || true
 EOF
 run_cs "$CASE8D"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case8d: 'TECH-1X planned' with only TECH-1 known does not match TECH-1 (token boundary), no fire"
 else
   fail "case8d: 'TECH-1X planned' with only TECH-1 known does not match TECH-1 (token boundary), no fire (rc=$rc got: $out)"
@@ -438,7 +458,8 @@ read -r -d '' CASE9 <<'EOF' || true
 EOF
 run_cs "$CASE9"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case9: a two-ID line classifies each ID against its own clause (no cross-contamination)"
 else
   fail "case9: a two-ID line classifies each ID against its own clause (no cross-contamination) (rc=$rc got: $out)"
@@ -460,7 +481,8 @@ run_cs "$CASE9B"
 t1issue=$(jqget "$out" '.reasons[0].issue // "none"')
 n=$(jqget "$out" '.reasons | length')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$n" = "1" ] && [ "$t1issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$n" = "1" ] && [ "$t1issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
   pass "case9b: only the actually-mismatched ID on a multi-ID line fires T1, class named in detail"
 else
   fail "case9b: only the actually-mismatched ID on a multi-ID line fires T1, class named in detail (rc=$rc got: $out)"
@@ -477,7 +499,9 @@ read -r -d '' CASE10 <<'EOF' || true
 EOF
 run_cs "$CASE10"
 docage=$(jqget "$out" '.counts.docAgeDays')
-if ok_success && [ "$docage" = "1" ]; then
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$docage" = "1" ] && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case10: options.now overrides the wall-clock date used for docAgeDays"
 else
   fail "case10: options.now overrides the wall-clock date used for docAgeDays (rc=$rc got: $out)"
@@ -493,7 +517,9 @@ read -r -d '' CASE10B <<'EOF' || true
 EOF
 run_cs "$CASE10B"
 docage=$(jqget "$out" '.counts.docAgeDays')
-if ok_success && [ "${docage:-0}" -gt 300 ] 2>/dev/null; then
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "${docage:-0}" -gt 300 ] 2>/dev/null && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case10b: with no options.now, docAgeDays is computed against the real wall clock"
 else
   fail "case10b: with no options.now, docAgeDays is computed against the real wall clock (rc=$rc got: $out)"
@@ -555,7 +581,8 @@ done
 # fetched empty result is not the same as a missing/failed fetch).
 run_cs '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00Z"},"issues":[]}'
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case11f: an empty issues array is valid and evaluates cleanly"
 else
   fail "case11f: an empty issues array is valid and evaluates cleanly (rc=$rc got: $out)"
@@ -638,7 +665,9 @@ check_instant_form() {
   run_cs "$json"
   changed=$(jqget "$out" '.counts.changedSinceDoc')
   docage=$(jqget "$out" '.counts.docAgeDays')
-  if ok_success && [ "$changed" = "1" ]; then
+  fire=$(jqget "$out" '.fire')
+  nreasons=$(jqget "$out" '.reasons | length')
+  if ok_success && [ "$changed" = "1" ] && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
     printf '%s %s\n' "$docage" "$changed"
   else
     printf 'FAILED rc=%s out=%s\n' "$rc" "$out"
@@ -676,7 +705,8 @@ EOF
 run_cs "$CASE13B"
 changed=$(jqget "$out" '.counts.changedSinceDoc')
 t1b=$(jqget "$out" '[.reasons[] | select(.rule=="T1b")] | length')
-if ok_success && [ "$changed" = "1" ] && [ "$t1b" = "1" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$changed" = "1" ] && [ "$t1b" = "1" ]; then
   pass "case13b: fractional seconds are preserved, not truncated (0.8s apart still counts as changed, fires T1b)"
 else
   fail "case13b: fractional seconds are preserved, not truncated (0.8s apart still counts as changed, fires T1b) (rc=$rc got: $out)"
@@ -688,9 +718,17 @@ fi
 # must all happen in jq against ISO instants, never against the shell's local
 # time, so TZ must not change the answer.
 tz_json='{"doc":{"text":"x","updatedAt":"2026-09-01T00:00:00"},"issues":[],"options":{"now":"2026-09-24T00:00:00Z"}}'
-e_budapest=$(printf '%s' "$tz_json" | TZ=Europe/Budapest "$CS" | jq -r '.counts.docAgeDays')
-e_default=$(printf '%s' "$tz_json" | "$CS" | jq -r '.counts.docAgeDays')
-if [ -n "$e_budapest" ] && [ "$e_budapest" = "$e_default" ]; then
+out_budapest=$(printf '%s' "$tz_json" | TZ=Europe/Budapest "$CS")
+out_default=$(printf '%s' "$tz_json" | "$CS")
+e_budapest=$(jqget "$out_budapest" '.counts.docAgeDays')
+e_default=$(jqget "$out_default" '.counts.docAgeDays')
+fire_budapest=$(jqget "$out_budapest" '.fire')
+fire_default=$(jqget "$out_default" '.fire')
+nreasons_budapest=$(jqget "$out_budapest" '.reasons | length')
+nreasons_default=$(jqget "$out_default" '.reasons | length')
+if [ -n "$e_budapest" ] && [ "$e_budapest" = "$e_default" ] \
+   && [ "$fire_budapest" = "false" ] && [ "$fire_default" = "false" ] \
+   && [ "$nreasons_budapest" = "0" ] && [ "$nreasons_default" = "0" ]; then
   pass "case13c: TZ=Europe/Budapest (DST) does not change docAgeDays for a no-offset timestamp vs. the default timezone"
 else
   fail "case13c: TZ=Europe/Budapest (DST) does not change docAgeDays for a no-offset timestamp vs. the default timezone (budapest=$e_budapest default=$e_default)"
@@ -713,7 +751,9 @@ read -r -d '' CASE14 <<'EOF' || true
 EOF
 run_cs "$CASE14"
 changed=$(jqget "$out" '.counts.changedSinceDoc')
-if ok_success && [ "$changed" = "1" ]; then
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$changed" = "1" ] && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case14: an issue 30 minutes before doc.updatedAt is excluded, one 30 minutes after is included"
 else
   fail "case14: an issue 30 minutes before doc.updatedAt is excluded, one 30 minutes after is included (rc=$rc got: $out)"
@@ -759,7 +799,8 @@ read -r -d '' CASE16 <<'EOF' || true
 EOF
 run_cs "$CASE16"
 t4issues=$(jqget "$out" '[.reasons[] | select(.rule=="T4") | .issue] | join(",")')
-if ok_success && [ "$t4issues" = "MIX-2" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$t4issues" = "MIX-2" ]; then
   pass "case16: T4 exclusion of canceled issues is per-issue, not blanket"
 else
   fail "case16: T4 exclusion of canceled issues is per-issue, not blanket (rc=$rc got: $out)"
@@ -784,7 +825,8 @@ read -r -d '' CASE17A <<'EOF' || true
 EOF
 run_cs "$CASE17A"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case17a: 'Done: TECH-1, planned: TECH-2' with matching states does not fire"
 else
   fail "case17a: 'Done: TECH-1, planned: TECH-2' with matching states does not fire (rc=$rc got: $out)"
@@ -809,7 +851,8 @@ read -r -d '' CASE17AFLIP <<'EOF' || true
 EOF
 run_cs "$CASE17AFLIP"
 t1_ids_classes=$(jqget "$out" '[.reasons[] | select(.rule=="T1") | .issue + ":" + (.detail | capture("\\((?<c>[a-z]+)\\)").c)] | sort | join(",")')
-if ok_success && [ "$t1_ids_classes" = "TECH-1:completed,TECH-2:unstarted" ]; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$t1_ids_classes" = "TECH-1:completed,TECH-2:unstarted" ]; then
   pass "case17a-flip: swapped states fire T1 on both TECH-1 (completed) and TECH-2 (unstarted), proving 17a's silence is a correct match, not no match"
 else
   fail "case17a-flip: swapped states fire T1 on both TECH-1 (completed) and TECH-2 (unstarted), proving 17a's silence is a correct match, not no match (rc=$rc t1=$t1_ids_classes got: $out)"
@@ -827,7 +870,8 @@ read -r -d '' CASE17B <<'EOF' || true
 EOF
 run_cs "$CASE17B"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case17b: 'TECH-1 done; revisit later' with TECH-1 completed does not fire"
 else
   fail "case17b: 'TECH-1 done; revisit later' with TECH-1 completed does not fire (rc=$rc got: $out)"
@@ -848,7 +892,8 @@ run_cs "$CASE17BFLIP"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
   pass "case17b-flip: TECH-1 actually started fires T1 (completed), proving 17b's silence is a correct match, not no match"
 else
   fail "case17b-flip: TECH-1 actually started fires T1 (completed), proving 17b's silence is a correct match, not no match (rc=$rc got: $out)"
@@ -866,7 +911,8 @@ read -r -d '' CASE17C <<'EOF' || true
 EOF
 run_cs "$CASE17C"
 fire=$(jqget "$out" '.fire')
-if ok_success && [ "$fire" = "false" ]; then
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
   pass "case17c: 'TECH-1: build live preview' with TECH-1 started does not fire"
 else
   fail "case17c: 'TECH-1: build live preview' with TECH-1 started does not fire (rc=$rc got: $out)"
@@ -889,7 +935,8 @@ run_cs "$CASE17CCTRL"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
   pass "case17c-control: 'TECH-1: shipped preview' vs a started issue fires T1 (completed), proving the clause still matches recognized words"
 else
   fail "case17c-control: 'TECH-1: shipped preview' vs a started issue fires T1 (completed), proving the clause still matches recognized words (rc=$rc got: $out)"
@@ -908,11 +955,191 @@ run_cs "$CASE17D"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
 issue=$(jqget "$out" '.reasons[0].issue // "none"')
 detail=$(jqget "$out" '.reasons[0].detail // ""')
-if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1317" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1317" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
   pass "case17d: table row 'planned (TECH-1317)' vs completed fires T1, classified unstarted"
 else
   fail "case17d: table row 'planned (TECH-1317)' vs completed fires T1, classified unstarted (rc=$rc got: $out)"
 fi
+
+# --- case 18: D1 fix (exactly one top-level JSON value on stdin) ------------
+# Two concatenated JSON objects bypass validation under jq's default stream
+# parsing unless explicitly rejected up front: exit 2, empty stdout, before
+# any T1-T4 evaluation runs on either object.
+
+CASE18A_OBJ1='{"doc":{"text":"TECH-1 done\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+CASE18A_OBJ2='{"doc":{"text":"TECH-2 done\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-2","stateType":"completed","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+out=$(printf '%s%s' "$CASE18A_OBJ1" "$CASE18A_OBJ2" | "$CS" 2>/dev/null)
+err=$(printf '%s%s' "$CASE18A_OBJ1" "$CASE18A_OBJ2" | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && [ -z "$out" ] && [ -n "$err" ]; then
+  pass "case18a: two valid-shaped concatenated JSON objects exit 2 with empty stdout"
+else
+  fail "case18a: two valid-shaped concatenated JSON objects exit 2 with empty stdout (rc=$rc out='$out' err='$err')"
+fi
+
+# case18b: one valid object followed by a structurally invalid one (bad
+# stateType) also exits 2 with empty stdout, not a clean result from the
+# first object.
+CASE18B_OBJ2='{"doc":{"text":"x","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"BAD-1","stateType":"bogus","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+out=$(printf '%s%s' "$CASE18A_OBJ1" "$CASE18B_OBJ2" | "$CS" 2>/dev/null)
+err=$(printf '%s%s' "$CASE18A_OBJ1" "$CASE18B_OBJ2" | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && [ -z "$out" ] && [ -n "$err" ]; then
+  pass "case18b: one valid object followed by an invalid object exits 2 with empty stdout"
+else
+  fail "case18b: one valid object followed by an invalid object exits 2 with empty stdout (rc=$rc out='$out' err='$err')"
+fi
+
+# case18c: a single valid top-level object still works (spot check; also
+# covered implicitly by every other case in this file).
+run_cs "$CASE18A_OBJ1"
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
+  pass "case18c: a single top-level JSON object still evaluates normally"
+else
+  fail "case18c: a single top-level JSON object still evaluates normally (rc=$rc got: $out)"
+fi
+
+# --- case 19: D2 fix (digit-period exception, single-ID table row) ----------
+
+# 19a: a period between two digits (a version token) is not a clause
+# boundary, so "done" stays in TECH-1's clause even after "v1.2".
+run_cs '{"doc":{"text":"TECH-1 v1.2 done\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case19a: 'TECH-1 v1.2 done' does not split the clause at the version period, fires T1 (completed)"
+else
+  fail "case19a: 'TECH-1 v1.2 done' does not split the clause at the version period, fires T1 (completed) (rc=$rc got: $out)"
+fi
+
+# 19b: a table row with the ID and status word in different cells still
+# attributes the status to the ID when the row references exactly one
+# known issue.
+run_cs '{"doc":{"text":"| TECH-1 | done |\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case19b: '| TECH-1 | done |' attributes the status cell to the ID cell, fires T1 (completed)"
+else
+  fail "case19b: '| TECH-1 | done |' attributes the status cell to the ID cell, fires T1 (completed) (rc=$rc got: $out)"
+fi
+
+# 19c: same single-ID whole-row rule with a third, unrelated cell in
+# between the ID and the status word.
+run_cs '{"doc":{"text":"| TECH-1 | Extraction agent | done |\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case19c: '| TECH-1 | Extraction agent | done |' attributes the status cell across an unrelated cell, fires T1 (completed)"
+else
+  fail "case19c: '| TECH-1 | Extraction agent | done |' attributes the status cell across an unrelated cell, fires T1 (completed) (rc=$rc got: $out)"
+fi
+
+# 19d: negative control, restated explicitly for D2: a comma-delimited line
+# with two IDs and two matching states still does not fire (already covered
+# by case17a; kept here as an explicit D2 regression since D2's own spec
+# names it as a case that must still NOT fire after the table-row change).
+run_cs '{"doc":{"text":"Done: TECH-1, planned: TECH-2\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"},{"id":"TECH-2","stateType":"unstarted","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
+  pass "case19d: 'Done: TECH-1, planned: TECH-2' still does not fire after the table-row fix"
+else
+  fail "case19d: 'Done: TECH-1, planned: TECH-2' still does not fire after the table-row fix (rc=$rc got: $out)"
+fi
+
+# 19e: a table row referencing TWO known IDs keeps ordinary per-cell
+# attribution instead of the whole-row rule: neither cell alone carries
+# both an ID and a status word, so neither ID gets any status evidence and
+# the row does not fire, proving the whole-row rule is single-ID only.
+run_cs '{"doc":{"text":"| TECH-1 | TECH-2 | done |\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"},{"id":"TECH-2","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
+  pass "case19e: a two-ID table row keeps per-cell attribution, not the single-ID whole-row rule"
+else
+  fail "case19e: a two-ID table row keeps per-cell attribution, not the single-ID whole-row rule (rc=$rc got: $out)"
+fi
+
+# 19f: a single-ID table row with two DIFFERENT status classes anywhere in
+# the row is reported as uncertain (no fire), same as a multi-class clause.
+run_cs '{"doc":{"text":"| TECH-1 | in progress | done |\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
+  pass "case19f: a single-ID table row with two status classes is uncertain, no fire"
+else
+  fail "case19f: a single-ID table row with two status classes is uncertain, no fire (rc=$rc got: $out)"
+fi
+
+# --- case 20: D3 fix (markdown-link vs bare-URL masking) ---------------------
+
+# 20a: a markdown link masks only its parenthesised destination, so text
+# right after the closing paren (":done") is still visible as status
+# evidence for the ID embedded in the destination.
+run_cs '{"doc":{"text":"[ticket](https://example.com/TECH-1):done\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case20a: '[ticket](https://example.com/TECH-1):done' sees text after the link, fires T1 (completed)"
+else
+  fail "case20a: '[ticket](https://example.com/TECH-1):done' sees text after the link, fires T1 (completed) (rc=$rc got: $out)"
+fi
+
+# 20b: a status word genuinely inside a bare URL's path is masked along
+# with the rest of the URL and never counts as status evidence.
+run_cs '{"doc":{"text":"https://x/done/TECH-1\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
+  pass "case20b: 'https://x/done/TECH-1' masks the whole URL path, no fire"
+else
+  fail "case20b: 'https://x/done/TECH-1' masks the whole URL path, no fire (rc=$rc got: $out)"
+fi
+
+# 20c: a bare URL followed by a comma-then-status-word does NOT fire: the
+# comma is not masked (it is not part of the URL, and is followed by a
+# space, so it stays an ordinary clause boundary), so "done" is in the
+# clause AFTER the comma, not in TECH-1's own clause, and is correctly not
+# attributed to it. This is deliberately no-fire, not fire: the OLD greedy
+# `http\S*` mask used to swallow the comma too (no whitespace between
+# "TECH-1" and the comma), which merged "done" into TECH-1's clause by
+# accident and made this repro fire for the wrong reason.
+run_cs '{"doc":{"text":"see https://x/TECH-1, done\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+fire=$(jqget "$out" '.fire')
+nreasons=$(jqget "$out" '.reasons | length')
+if ok_success && [ "$fire" = "false" ] && [ "$nreasons" = "0" ]; then
+  pass "case20c: 'see https://x/TECH-1, done' does not fire (comma is a real clause boundary, not part of the URL)"
+else
+  fail "case20c: 'see https://x/TECH-1, done' does not fire (comma is a real clause boundary, not part of the URL) (rc=$rc got: $out)"
+fi
+
+# 20d: discriminating two-ID variant of 20c, proving the comma boundary
+# actually protects TECH-1's clause rather than merely producing a
+# no-fire result by accident: TECH-1's clause (up to the comma) stays
+# clean, but TECH-2's clause ("TECH-2 done") correctly fires T1.
+run_cs '{"doc":{"text":"see https://x/TECH-1, TECH-2 done\n","updatedAt":"2026-09-01T00:00:00Z"},"issues":[{"id":"TECH-1","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"},{"id":"TECH-2","stateType":"started","createdAt":"2026-08-01T00:00:00Z","updatedAt":"2026-08-01T00:00:00Z"}]}'
+n=$(jqget "$out" '.reasons | length')
+t1issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "true" ] && [ "$n" = "1" ] && [ "$t1issue" = "TECH-2" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case20d: 'see https://x/TECH-1, TECH-2 done' fires T1 on TECH-2 only, TECH-1's clause stays clean"
+else
+  fail "case20d: 'see https://x/TECH-1, TECH-2 done' fires T1 on TECH-2 only, TECH-1's clause stays clean (rc=$rc got: $out)"
+fi
+
 
 # --- summary ------------------------------------------------------------------
 

@@ -12,6 +12,16 @@
 #               "title":"optional"}, ...],
 #    "options":{"volumeThreshold":5,"maxAgeDays":7,"now":"<ISO-8601, optional>"}}
 #
+# Input contract: stdin must contain exactly one top-level JSON value, and
+# that value must be an object. This is checked before anything else,
+# including the JSON-well-formedness check below: jq's parser reads a stream
+# of concatenated top-level values by default, so two JSON objects back to
+# back on stdin (a doubled adapter write, a retried request appended instead
+# of replaced) would otherwise let a later invalid object slip through
+# unevaluated while an early, valid-looking one drives the result. Anything
+# other than exactly one object exits 2 with a message on stderr, before any
+# other validation or evaluation runs.
+#
 # Validation is strict, exit 2 with a specific stderr message per violation,
 # checked BEFORE any T1-T4 evaluation (a malformed value anywhere means no
 # rule is evaluated at all, so a broken adapter can never look like a clean
@@ -77,18 +87,52 @@
 # Matched doc-side text and known issue ids are both normalised to
 # upper case before comparing.
 #
-# Clause-based attribution: a line is split into clauses at `,` `;` `|`
-# `.` (the last of these also covers markdown table cell borders, since
-# `|`-delimited cells are already a clause split). An ID's status evidence is
-# whatever status word(s) appear in the SAME clause as that ID's own
-# reference. If a clause contains words from two or more different
-# classes, that occurrence is reported as NO T1 (uncertain) rather than
-# picked by priority. A status word inside a URL (anything from `http` to
-# the next whitespace) is never counted: URLs are blanked to same-length
-# whitespace runs before clause-splitting and status-word scanning (which
-# also means a `.` or `,` inside a URL's domain/path never fragments a
-# clause), while ID matching still runs against the ORIGINAL unmasked line
-# so an id embedded in a URL is still found.
+# Clause-based attribution: a line is split into clauses at `,` `;` `|` and
+# `.` (the `|` split also covers markdown table cell borders, since
+# `|`-delimited cells are already a clause split), with one exception: a `.`
+# with a digit on both sides (`v1.2`, `3.14`, each `.` in `1.2.3`) is not a
+# clause boundary, since it is a decimal point or version separator, not
+# sentence punctuation. An ID's status evidence is whatever status word(s)
+# appear in the SAME clause as that ID's own reference. If a clause contains
+# words from two or more different classes, that occurrence is reported as
+# NO T1 (uncertain) rather than picked by priority. A status word inside a
+# URL is never counted; see "URL masking" below for exactly what counts as a
+# URL for this purpose. ID matching always runs against the ORIGINAL
+# unmasked line, so an id embedded in a URL is still found regardless of
+# masking.
+#
+# Markdown table row exception: when a line starts with `|` (optionally
+# preceded by whitespace) and references exactly one known issue ID anywhere
+# in the row, that ID's status evidence is drawn from the WHOLE ROW (every
+# cell, not just the one it appears in) rather than from its own clause: a
+# common table shape puts the ID in one cell and its status word in another
+# ("| TECH-1 | Extraction agent | done |"). This still requires the row's
+# status words to belong to a single class; two classes anywhere in such a
+# row (e.g. "done" in one cell and "in progress" in another) is reported as
+# uncertain, same as a multi-class clause. A row that references two or more
+# known IDs keeps ordinary per-cell (clause-scoped) attribution instead: the
+# whole-row rule only applies when the row is unambiguously about one issue.
+#
+# URL masking: a URL span is blanked to same-length whitespace before
+# clause-splitting and status-word scanning, so a status word or delimiter
+# character inside it is never seen by either. Two forms are recognized:
+#   - A markdown link `[text](destination)`: only the parenthesised
+#     destination is masked, not the link text or anything outside the
+#     parens. This is what lets `[ticket](https://x/TECH-1):done` still see
+#     "done" as status evidence: the destination is masked, the literal
+#     `):done` after it is untouched.
+#   - A bare URL starting with `http`: masked up to the first whitespace, or
+#     up to (but not including) the first `)` `]` `>` `"` or `'`, whichever
+#     comes first. A trailing run of `.` `,` `:` `;` immediately before that
+#     stopping point is excluded from the mask when what follows it is
+#     whitespace or end of line (ordinary sentence punctuation stuck to the
+#     end of a URL, not part of it), but included when it is followed by one
+#     of the other stop characters instead (there is no whitespace there to
+#     signal "this punctuation is not part of the URL").
+# A status word genuinely inside a URL's path (`https://x/done/TECH-1`)
+# still never counts, since the whole path up to the next whitespace is
+# masked; only trailing sentence punctuation right at the boundary is ever
+# excluded from the mask.
 #
 # Design notes:
 #   - Colon is deliberately NOT a clause-splitting character. This is what
@@ -122,11 +166,22 @@
 #     never the shell's `date`), so behavior is identical on BSD (macOS) and
 #     GNU (Linux) without a dispatch branch, and fractional seconds are kept
 #     in the epoch value (not truncated), so two timestamps a fraction of a
-#     second apart still compare correctly across a boundary. jq's regex
-#     support (test/match/capture, including lookaround) needs jq built with
-#     Oniguruma, the default for jq 1.6 and newer; a build without it is
-#     probed for and rejected with exit 2 rather than failing deep inside the
-#     filter.
+#     second apart still compare correctly across a boundary.
+#   - Known limitation, not fixed: up to 7 fractional-second digits parse
+#     (e.g. `.0000001`), but the epoch value is an IEEE double, whose
+#     absolute resolution at a 2020s-era epoch (~1.8e9) is its own floating
+#     point granularity, roughly 2^-22 seconds (about 0.24 microseconds), not
+#     the 100-nanosecond resolution 7 digits implies. Measured directly: a
+#     1-millisecond difference and a 1-microsecond difference both compare
+#     correctly, but two timestamps 100 nanoseconds apart (the 7th
+#     fractional digit) compute to the identical epoch value and compare as
+#     equal. Timestamps this close together are not a realistic case for a
+#     PM-doc staleness check, so this is accepted rather than reimplemented
+#     with arbitrary-precision arithmetic.
+#   - jq's regex support (test/match/capture, including lookaround) needs jq
+#     built with Oniguruma, the default for jq 1.6 and newer; a build
+#     without it is probed for and rejected with exit 2 rather than failing
+#     deep inside the filter.
 #
 # Requires: bash, jq (1.6+, built with regex/Oniguruma support, for
 # lookaround assertions, and codepoint-based match offsets; jq 1.7+ is known
@@ -178,8 +233,29 @@ fi
 
 INPUT=$(cat)
 
-if ! printf '%s' "$INPUT" | jq -e . >/dev/null 2>&1; then
-  echo "check-staleness: malformed JSON on stdin" >&2
+# Exactly one top-level JSON value, and that value must be an object. Checked
+# via `jq -s` (slurp: collects every top-level value on stdin into one
+# array) BEFORE anything else, including well-formedness: `jq -e .` alone
+# processes stdin as a STREAM of concatenated top-level values and only
+# looks at the truthiness of the LAST one, so two JSON objects back to back
+# (a doubled adapter write) would pass a plain `jq -e .` check and then feed
+# both objects through validation and evaluation below it, one output per
+# object, silently. Slurping first makes "how many top-level values are
+# there" a question this script answers once, up front, rather than an
+# emergent property of how jq happens to stream multiple filter results.
+SHAPE_ERR_FILE=$(mktemp)
+SHAPE=$(printf '%s' "$INPUT" | jq -sc '{n: length, ok: (length == 1 and (.[0] | type) == "object")}' 2>"$SHAPE_ERR_FILE")
+SHAPE_RC=$?
+if [ "$SHAPE_RC" -ne 0 ]; then
+  echo "check-staleness: malformed JSON on stdin: $(cat "$SHAPE_ERR_FILE")" >&2
+  rm -f "$SHAPE_ERR_FILE"
+  exit 2
+fi
+rm -f "$SHAPE_ERR_FILE"
+SHAPE_OK=$(printf '%s' "$SHAPE" | jq -r '.ok')
+if [ "$SHAPE_OK" != "true" ]; then
+  SHAPE_N=$(printf '%s' "$SHAPE" | jq -r '.n')
+  echo "check-staleness: stdin must contain exactly one top-level JSON value, and it must be an object (found $SHAPE_N top-level value(s))" >&2
   exit 2
 fi
 
@@ -292,16 +368,60 @@ def issue_alt_re($issues):
 
 def repeat_char($c; $n): if $n <= 0 then "" else ([range(0; $n) | $c] | join("")) end;
 
-# Blanks out (with spaces, length-preserved) every run from "http" to the
-# next whitespace, so status words inside a URL are never matched and a
-# delimiter char inside a URL never fragments a clause, while an ID inside
-# the URL is still found by matching against the ORIGINAL (unmasked) line.
-def mask_urls:
+# URL masking: blanks a URL span to same-length whitespace so a status word
+# or delimiter character inside it is never seen by clause-splitting or
+# status-word scanning. An ID inside the span is still found regardless,
+# since ID matching always runs against the ORIGINAL (unmasked) line. See
+# "URL masking" in the header comment for the exact rule; summary: a
+# markdown link masks only its parenthesised destination, a bare URL masks
+# up to the first whitespace or one of `)` `]` `>` `"` or an apostrophe, with a trailing run of
+# `.,:;` excluded from the mask when it is followed by whitespace or EOL.
+
+# Masks only the (?<dest>...) capture of a markdown link `[text](dest)`,
+# leaving the brackets, the link text, the parens themselves, and anything
+# outside the link untouched. Runs BEFORE mask_bare_urls, so a link whose
+# destination is an http(s) URL never reaches the bare-URL pass at all: the
+# destination text (including its "http" prefix) is already blanked.
+def mask_markdown_links:
   . as $s
-  | ([match("http\\S*"; "g")]) as $ms
+  | ([match("\\[[^\\]]*\\]\\((?<dest>[^)]*)\\)"; "g")]) as $ms
   | reduce $ms[] as $m
       ($s;
-        .[0:$m.offset] + repeat_char(" "; ($m.string | length)) + .[($m.offset + ($m.string | length)):]);
+        ($m.captures[0]) as $c
+        | if $c == null then .
+          else .[0:$c.offset] + repeat_char(" "; $c.length) + .[($c.offset + $c.length):]
+          end);
+
+# Given a raw "http...\S*"-shaped candidate match (which already stops at
+# whitespace or at one of the unconditional stop characters `)` `]` `>` `"` or an apostrophe, since
+# those are excluded from the character class below), decides how much of it
+# to actually mask: a trailing run of `.,:;` right at the end of the
+# candidate is excluded from the mask when the character immediately after
+# the candidate (in the ORIGINAL string $s, not the in-progress reduction)
+# is whitespace or end of line, since that punctuation reads as sentence
+# punctuation stuck to the URL, not part of it. When the candidate is
+# instead followed directly by one of the unconditional stop characters
+# (e.g. a URL immediately closed by a `)` with no space), there is no
+# whitespace to signal "this trailing punctuation is not part of the URL",
+# so it stays masked.
+def bare_url_span($m; $s):
+  ($m.offset + ($m.string | length)) as $end
+  | ($s[$end:($end + 1)]) as $nextchar
+  | (($nextchar == "") or ($nextchar | test("\\s"))) as $trim_trailing_punct
+  | (if $trim_trailing_punct then ($m.string | sub("[.,:;]+$"; "")) else $m.string end) as $eff
+  | {offset: $m.offset, len: ($eff | length)};
+
+def mask_bare_urls:
+  . as $s
+  | ([match("http[^\\s)\\]>\"\\u0027]*"; "g")]) as $ms
+  | reduce $ms[] as $m
+      ($s;
+        bare_url_span($m; $s) as $sp
+        | if $sp.len <= 0 then .
+          else .[0:$sp.offset] + repeat_char(" "; $sp.len) + .[($sp.offset + $sp.len):]
+          end);
+
+def mask_urls: mask_markdown_links | mask_bare_urls;
 
 # "not (?:yet )?started" comes before the bare "not yet" alternative in this
 # list so "not yet started" is consumed as one match: if "not yet" were tried
@@ -325,8 +445,14 @@ def class_of_word($w):
     elif ($lw | test("^(?:" + (started_words | join("|")) + ")$")) then "started"
     else null end;
 
+# `,` `;` `|` always break a clause. A `.` breaks a clause UNLESS it has a
+# digit on both sides (a decimal point or version separator: `v1.2`, `3.14`,
+# each `.` in `1.2.3`). Expressed as two alternatives so a period with a
+# digit on only one side (or neither) still breaks: "not preceded by a
+# digit" OR "not followed by a digit" is the logical negation of "preceded
+# by a digit AND followed by a digit".
 def clause_breaks($masked_line):
-  [$masked_line | match("[,;|.]"; "g") | .offset];
+  [$masked_line | match("[,;|]|(?<![0-9])\\.|\\.(?![0-9])"; "g") | .offset];
 
 def clause_ranges($breaks; $len):
   ([0] + ($breaks | map(. + 1))) as $starts
@@ -360,16 +486,23 @@ def allowed_state_types($class):
   elif $class == "started" then ["started"]
   else [] end;
 
-# One occurrence per (line, ID-match) pair. cls is the classify_clause
-# result for the CLAUSE containing that specific match: this is what T1
-# uses (clause-scoped attribution). linehasword is the classify_clause
-# result for the WHOLE line instead (any status word anywhere on the line,
-# from any class, including an ambiguous one): this is what T1b uses. The
-# T1b rule (no status word at all on ANY line that mentions the issue) is a
+# One occurrence per (line, ID-match) pair. cls is normally the
+# classify_clause result for the CLAUSE containing that specific match:
+# this is what T1 uses (clause-scoped attribution). The one exception is a
+# markdown table row (see "Markdown table row exception" in the header
+# comment): when the line starts with `|` and references exactly one known
+# issue ID, cls is instead the classify_clause result for the WHOLE ROW
+# (linecls below), since a table commonly puts the ID in one cell and its
+# status word in another. A row with two or more known IDs keeps ordinary
+# per-cell attribution. linehasword is the classify_clause result for the
+# WHOLE line regardless (any status word anywhere on the line, from any
+# class, including an ambiguous one): this is what T1b uses. The T1b rule
+# (no status word at all on ANY line that mentions the issue) is a
 # line-wide check; only T1 attribution of a word to a specific ID is
-# clause-scoped. A line like "TICK-9, in progress" therefore has
-# linehasword true for TICK-9 (T1b does not fire) even though T1 correctly
-# refuses to attribute "in progress" to TICK-9 across the comma clause break.
+# clause-scoped (or row-scoped, in the single-ID table exception). A line
+# like "TICK-9, in progress" therefore has linehasword true for TICK-9
+# (T1b does not fire) even though T1 correctly refuses to attribute "in
+# progress" to TICK-9 across the comma clause break.
 def line_occurrences($doc; $issues):
   if ($issues | length) == 0 then []
   else
@@ -381,8 +514,12 @@ def line_occurrences($doc; $issues):
         | ($line | mask_urls) as $masked
         | (clause_breaks($masked)) as $breaks
         | (clause_ranges($breaks; ($line | length))) as $ranges
-        | (classify_clause($masked) != null) as $linehasword
+        | (classify_clause($masked)) as $linecls
+        | ($linecls != null) as $linehasword
+        | ($line | test("^[ \t]*\\|")) as $is_table_row
         | ([$line | match($idre; "gi")]) as $ms
+        | ($ms | map($byid[(.string | ascii_upcase)].id) | unique) as $row_ids
+        | ($is_table_row and (($row_ids | length) == 1)) as $use_row_cls
         | range(0; ($ms | length)) as $mi
         | $ms[$mi] as $m
         | ($m.string | ascii_upcase) as $upid
@@ -390,7 +527,8 @@ def line_occurrences($doc; $issues):
         | select($iss != null)
         | (clause_containing($m.offset; $ranges)) as $cr
         | ($masked[$cr.start:$cr.end]) as $clausetext
-        | {id: $iss.id, line: ($line | trim), cls: classify_clause($clausetext), linehasword: $linehasword, iss: $iss}
+        | (if $use_row_cls then $linecls else classify_clause($clausetext) end) as $occ_cls
+        | {id: $iss.id, line: ($line | trim), cls: $occ_cls, linehasword: $linehasword, iss: $iss}
       ]
   end;
 
