@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# check-staleness: evaluates the four PM-doc staleness rules (T1-T4) against a
+# JSON snapshot of a living document and its linked issues. Tool-independent:
+# a per-tool "recipe" (skills/document-hygiene/references/*.md) only has to
+# produce the input shape below; this script does not talk to Linear, Jira,
+# or any other API.
+#
+# Input (stdin), one JSON object:
+#   {"doc":{"text":"...","updatedAt":"<ISO-8601>"},
+#    "issues":[{"id":"TECH-1317","state":"Done","stateType":"completed",
+#               "createdAt":"<ISO-8601>","updatedAt":"<ISO-8601>",
+#               "title":"optional"}, ...],
+#    "options":{"volumeThreshold":5,"maxAgeDays":7,"now":"<ISO-8601, optional>"}}
+#
+# stateType is one of backlog, unstarted, started, completed, canceled
+# (Linear's vocabulary; a recipe maps its own tool's statuses onto this set).
+#
+# Output (stdout), one JSON object:
+#   {"fire":true|false,
+#    "reasons":[{"rule":"T1","issue":"TECH-1317","detail":"...","line":"..."}],
+#    "counts":{"changedSinceDoc":7,"newUnreferenced":5,"docAgeDays":1}}
+#
+# Exit 0 on a normal evaluation (fire or no fire). Exit 2 on malformed input,
+# a missing/regex-incapable jq, or a value jq could not parse (e.g. a
+# timestamp that isn't ISO-8601), with a message on stderr in every case.
+# --quiet prints only the literal string "fire" or "no fire" instead of the
+# full JSON object (still exit 0/2 as above).
+#
+# The four rules:
+#   T1  status mismatch: an issue ID referenced in the doc text whose current
+#       stateType disagrees with the status wording on the same line as the
+#       ID. Word classes: unstarted = planned, not started, todo, to do,
+#       backlog, not yet, upcoming, later; started = in progress, started,
+#       ongoing, wip, building, in review; completed = done, shipped, live,
+#       merged, completed, released.
+#   T1b weaker sub-rule: a referenced issue whose updatedAt is after
+#       doc.updatedAt and whose stateType is started or completed, with NO
+#       status word on ANY of its referencing lines. Reported separately from
+#       T1, once per issue (not once per line).
+#   T2  volume: at least volumeThreshold (default 5) non-canceled issues with
+#       updatedAt after doc.updatedAt.
+#   T3  age: doc.updatedAt older than maxAgeDays (default 7) while the
+#       project is active (at least one issue, canceled included, updated
+#       within maxAgeDays of "now").
+#   T4  unreferenced new issues: non-canceled issues with createdAt after
+#       doc.updatedAt whose ID does not appear anywhere in the doc text
+#       (plain mentions and IDs embedded in a URL both count as a reference).
+#
+# Design notes:
+#   - Canceled issues are ignored for T2 and T4 only (per spec), not for T1
+#     or the T3 activity check: a cancellation is still an edit to the doc's
+#     "current truth" and still counts as project activity.
+#   - A line with two or more ticket IDs is split at each ID's own match
+#     offset before classifying, so a status word describing one ticket is
+#     never attributed to its neighbour ("TECH-1 done, TECH-2 in progress"
+#     correctly reads TECH-1 as completed and TECH-2 as started, not both as
+#     whichever word class the whole line matched first). The FIRST ID on a
+#     line still sees any text before it (e.g. "Planned: TECH-1"); a status
+#     word written before a NON-first ID on a multi-ID line is attributed to
+#     the ID that precedes it instead, since ticket-then-status is the
+#     ordinary phrasing this rule is built for.
+#   - Word-class priority when a line matches more than one class is
+#     unstarted, then completed, then started, in that order (this also
+#     resolves "not started" containing the substring "started": the
+#     unstarted phrase is checked first, so it does not fall through to the
+#     started class). This is a deliberate simplification, not a claim that
+#     natural language is unambiguous: short generic words ("later", "wip",
+#     "live", "building") can appear in unrelated prose sharing a line with
+#     an ID and will still be read as a status word.
+#   - Dates are compared as portable ISO-8601 conversions done entirely in
+#     jq (fromdateiso8601, after stripping fractional seconds and handling a
+#     numeric UTC offset by hand), never via the shell's `date`, so behavior
+#     is identical on BSD (macOS) and GNU (Linux) without a dispatch branch.
+#     jq's regex support (test/match/scan/capture) needs jq built with
+#     Oniguruma, which is the default for jq 1.6 and newer; a build without
+#     it is probed for and rejected with exit 2 rather than failing deep
+#     inside the filter.
+#
+# Requires: bash, jq (1.6+, built with regex/Oniguruma support). No other
+# runtime dependency: this script never makes a network call.
+
+set -u
+
+QUIET=0
+for arg in "$@"; do
+  case "$arg" in
+    --quiet) QUIET=1 ;;
+    *) ;;
+  esac
+done
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "check-staleness: jq is required but was not found on PATH (macOS: brew install jq; Debian/Ubuntu: apt install jq)" >&2
+  exit 2
+fi
+
+# jq builds without Oniguruma have no regex support at all: test/match/scan/
+# capture would fail deep inside the filter below with a confusing error.
+# Probe the cheapest one of them up front instead.
+if ! jq -n '"a" | test("a")' >/dev/null 2>&1; then
+  echo "check-staleness: this jq build has no regex support (test(\"a\") failed); need jq 1.6 or newer built with Oniguruma" >&2
+  exit 2
+fi
+
+INPUT=$(cat)
+
+if ! printf '%s' "$INPUT" | jq -e . >/dev/null 2>&1; then
+  echo "check-staleness: malformed JSON on stdin" >&2
+  exit 2
+fi
+
+if ! printf '%s' "$INPUT" | jq -e '
+    (.doc.text? != null)
+    and (.doc.updatedAt? != null)
+    and ((.issues? // []) | type == "array")
+  ' >/dev/null 2>&1; then
+  echo "check-staleness: input missing required fields (doc.text, doc.updatedAt, issues[])" >&2
+  exit 2
+fi
+
+# The jq filter implementing T1-T4. Kept as a single program string (not a
+# separate .jq file) so this script has no path-resolution dependency on
+# where it was copied to (see the root README's Install section: this file
+# is copied to ~/.claude/hooks/ alongside the two hook scripts).
+FILTER='
+def toepoch:
+  . as $s
+  | ($s | sub("\\.[0-9]+"; "")) as $n
+  | if ($n | test("Z$")) then
+      ($n | fromdateiso8601)
+    elif ($n | test("[+-][0-9]{2}:?[0-9]{2}$")) then
+      ($n | capture("^(?<base>.*)(?<sign>[+-])(?<oh>[0-9]{2}):?(?<om>[0-9]{2})$")) as $c
+      | (($c.base + "Z") | fromdateiso8601) as $ep
+      | (($c.oh | tonumber) * 3600 + ($c.om | tonumber) * 60) as $off
+      | (if $c.sign == "+" then $ep - $off else $ep + $off end)
+    else
+      (($n + "Z") | fromdateiso8601)
+    end;
+
+def unstarted_re: "\\b(planned|not started|to ?do|backlog|not yet|upcoming|later)\\b";
+def completed_re: "\\b(done|shipped|live|merged|completed|released)\\b";
+def started_re:   "\\b(in progress|started|ongoing|wip|building|in review)\\b";
+
+def first_match($re):
+  ([match($re; "i")]) as $ms
+  | if ($ms | length) > 0 then $ms[0].string else null end;
+
+def classify_line:
+  . as $line
+  | ($line | first_match(unstarted_re)) as $u
+  | ($line | first_match(completed_re)) as $c
+  | ($line | first_match(started_re))   as $s
+  | if $u != null then {class: "unstarted", word: $u}
+    elif $c != null then {class: "completed", word: $c}
+    elif $s != null then {class: "started", word: $s}
+    else null end;
+
+def allowed_state_types($class):
+  if $class == "unstarted" then ["backlog", "unstarted"]
+  elif $class == "completed" then ["completed"]
+  elif $class == "started" then ["started"]
+  else [] end;
+
+def trim:
+  sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
+
+def line_occurrences($doc; $issues):
+  ($doc.text | split("\n")) as $lines
+  | ($issues | INDEX(.id)) as $byid
+  | [ range(0; ($lines | length)) as $li
+      | $lines[$li] as $line
+      | ([$line | match("[A-Z][A-Z0-9]+-[0-9]+"; "g")]) as $ms
+      | range(0; ($ms | length)) as $mi
+      | $ms[$mi] as $m
+      | ($m.string) as $id
+      | $byid[$id] as $iss
+      | select($iss != null)
+      | (if $mi == 0 then 0 else $m.offset end) as $startpos
+      | (if ($mi + 1) < ($ms | length) then $ms[$mi + 1].offset else ($line | length) end) as $endpos
+      | ($line[$startpos:$endpos]) as $segment
+      | {id: $id, line: ($line | trim), cls: ($segment | classify_line), iss: $iss}
+    ];
+
+def t1_reasons($occurrences):
+  [ $occurrences[]
+    | select(.cls != null)
+    | . as $occ
+    | select((allowed_state_types($occ.cls.class) | index($occ.iss.stateType)) == null)
+    | {rule: "T1", issue: $occ.id, detail: ("line says " + ($occ.cls.word | ascii_downcase) + ", issue is " + $occ.iss.stateType), line: $occ.line}
+  ];
+
+def t1b_reasons($occurrences; $doc_epoch):
+  [ $occurrences
+    | group_by(.id)[]
+    | . as $grp
+    | $grp[0].iss as $iss
+    | select(all($grp[]; .cls == null))
+    | select((($iss.updatedAt | toepoch) > $doc_epoch) and ($iss.stateType == "started" or $iss.stateType == "completed"))
+    | {rule: "T1b", issue: $grp[0].id, detail: ("issue updated after the doc and is " + $iss.stateType + ", but no referencing line has a status word"), line: $grp[0].line}
+  ];
+
+. as $input
+| $input.doc as $doc
+| ($input.issues // []) as $issues
+| ($input.options // {}) as $options
+| ($options.volumeThreshold // 5) as $volThresh
+| ($options.maxAgeDays // 7) as $maxAgeDays
+| ($doc.updatedAt | toepoch) as $doc_epoch
+| (if ($options.now // null) == null then now else ($options.now | toepoch) end) as $now_epoch
+| ($issues | map(select(.stateType != "canceled"))) as $active
+| ($active | map(select((.updatedAt | toepoch) > $doc_epoch))) as $changed
+| ($active | map(select(
+    (.createdAt | toepoch) > $doc_epoch
+    and (.id as $iid | ($doc.text | test("\\b" + $iid + "\\b")) | not)
+  ))) as $unref
+| ((($now_epoch - $doc_epoch) / 86400) | floor) as $docAgeDays
+| (($now_epoch - $doc_epoch) > ($maxAgeDays * 86400)) as $doc_old
+| (any($issues[]; ($now_epoch - (.updatedAt | toepoch)) <= ($maxAgeDays * 86400))) as $project_active
+| ($doc_old and $project_active) as $t3
+| (line_occurrences($doc; $issues)) as $occurrences
+| (t1_reasons($occurrences)) as $t1
+| (t1b_reasons($occurrences; $doc_epoch)) as $t1b
+| (if ($changed | length) >= $volThresh then
+     [{rule: "T2", detail: (($changed | length | tostring) + " issues updated after doc.updatedAt (threshold " + ($volThresh | tostring) + ")")}]
+   else [] end) as $t2
+| (if $t3 then
+     [{rule: "T3", detail: ("doc is " + ($docAgeDays | tostring) + " days old (threshold " + ($maxAgeDays | tostring) + " days) while the project is active")}]
+   else [] end) as $t3r
+| ($unref | map({rule: "T4", issue: .id, detail: ("created after the doc (" + .createdAt + ") and not mentioned in the doc")})) as $t4
+| ($t1 + $t1b + $t2 + $t3r + $t4) as $reasons
+| {
+    fire: (($reasons | length) > 0),
+    reasons: $reasons,
+    counts: {
+      changedSinceDoc: ($changed | length),
+      newUnreferenced: ($unref | length),
+      docAgeDays: $docAgeDays
+    }
+  }
+'
+
+ERR_FILE=$(mktemp)
+RESULT=$(printf '%s' "$INPUT" | jq -c "$FILTER" 2>"$ERR_FILE")
+RC=$?
+if [ "$RC" -ne 0 ]; then
+  echo "check-staleness: evaluation failed: $(cat "$ERR_FILE")" >&2
+  rm -f "$ERR_FILE"
+  exit 2
+fi
+rm -f "$ERR_FILE"
+
+if [ "$QUIET" -eq 1 ]; then
+  printf '%s' "$RESULT" | jq -r 'if .fire then "fire" else "no fire" end'
+else
+  printf '%s\n' "$RESULT"
+fi
+exit 0

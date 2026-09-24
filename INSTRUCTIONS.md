@@ -59,6 +59,32 @@ Do not print it up front. Before the first edit, tell the user in three words th
 
 If any check fails, handle that doc in propose mode even though the session mode is apply, and say so in one line, naming the specific reason: not in a git repository, never committed, has uncommitted changes, is a symlink, or git not installed. When the reason is "not in a git repository", say so and offer to initialize git for the folder (one time: `git init`, add the docs, commit); never run `git init` unasked, because creating a `.git` directory in someone's folder (a synced or shared folder, for instance) is a visible change they must approve. Never auto-commit, never stash (`git stash create` writes objects; it is not storage-free and is not a durable recovery point).
 
+## Living documents in project-management tools
+
+Everything above assumes the document is a file an agent can re-read and edit directly. A project's "current state" doc can also live inside a project-management tool instead: a Linear project document, a Jira or Confluence page, a Notion database entry, a GitHub Projects readme. The doc doesn't change shape, but two things do: what "current evidence" means (the issue graph, not a second file to fetch), and how a fix reaches the doc (a comment, never a direct edit).
+
+**Evidence.** For a PM doc, current evidence is the issue graph: issue statuses and completion dates, issue relations (blocks/blocked-by, parent/child), linked pull-request state, and sibling documents in the same project. Re-verifying a claim (step 2 below) means checking it against the issue graph, the same way it means re-running a query or re-fetching a page for a code or plan doc.
+
+**Opt-in marker.** A PM doc is checked only when it carries a `hygiene: watch` marker in its first 25 lines (the positive mirror of `hygiene: ignore`), or on explicit request. Most PM editors strip HTML comments, so this marker is a plain visible line of text, not a comment: `hygiene: watch`. A doc without the marker is left alone unless the user asks by name.
+
+**The trigger is a data contract, not a schedule.** Four deterministic rules over fields every PM tool exposes (the doc's text and updatedAt; each issue's id, state, stateType, createdAt, updatedAt) decide whether a reconciliation pass is due at all:
+
+| Rule | Fires when |
+|---|---|
+| T1 (status mismatch) | An issue ID referenced in the doc text whose current stateType disagrees with the status wording on the same line as the ID (unstarted / started / completed word classes). |
+| T1b (weaker: silent drift) | A referenced issue updated after the doc, now started or completed, with no status word at all on any line that mentions it. |
+| T2 (volume) | At least N issues (default 5) updated after the doc's own updatedAt. |
+| T3 (age) | The doc is older than X days (default 7) while the project is still active. |
+| T4 (unreferenced new work) | Issues created after the doc's updatedAt whose ID never appears in the doc text. |
+
+`bin/check-staleness` (bash and `jq`, no other dependency) implements this evaluator, tool-independently: it reads one JSON object (the doc's text and updatedAt, plus an issues array) on stdin and reports which rules fired and why. A per-tool recipe only has to produce that JSON; it never re-implements the rules. `skills/document-hygiene/references/` has worked recipes for Linear, Jira, and a generic template for any other tool.
+
+**Checklist**, once the trigger fires (or on explicit request): status words in the doc against each referenced issue's real status; counts and lists in the doc against the ticket that defines them; a "not yet ticketed" or "planned, no ticket" list against issues that already exist; decisions recorded in the doc against later run reports or completed-ticket outcomes; and names (models, columns, classes, tools) against whatever the most recently completed ticket actually shipped.
+
+**Propose only, delivered as a comment.** Apply mode does not exist for a PM doc: there is no git undo there, so every PM-doc reconciliation runs in propose mode regardless of the agent's configured mode. The result is delivered as a comment on the document or project (every PM tool has comments), never written into the doc itself.
+
+**Scheduling is offered, never created unasked.** Wiring the check to a clock or an event (a scheduled job, a webhook, an agent mention inside the PM tool) is host-specific and is not built into this procedure. The first time a PM-doc check runs manually for a given project, offer to set up a recurring check on whichever mechanism the host supports, and wait for a yes before creating anything.
+
 ## Procedure
 
 1. **Re-read the whole artifact fresh.** Do not trust your memory of what it says: open it and read it end to end. Drift hides in the sections you didn't touch this turn.
@@ -76,6 +102,8 @@ If any check fails, handle that doc in propose mode even though the session mode
    - Names of tools, files, and links.
 
    Example (PM-flavored): a launch plan still lists "blocked on the payments API migration" two weeks after that migration shipped, so the reader plans around a dependency that no longer exists. Example (coding): a README's install step calls `setup.sh`; the script was renamed to `bootstrap.sh` months ago and nobody updated the doc.
+
+   **Step 2b (PM-tool docs only).** When the artifact is a document living inside a project-management tool rather than a file, "current evidence" is the issue graph, not a second file to fetch: for each status word in the doc, look up the referenced issue's real state; for each count or list, check it against the ticket that defines it; for each "not yet ticketed" mention, check whether a ticket now exists; for each decision, check it against later run reports; for each named model, column, or tool, check it against the latest completed ticket. See "Living documents in project-management tools" above for the trigger rules and delivery (propose-only, posted as a comment, never edited into the doc).
 
 3. **Reconcile contradictions.** If two parts of the doc disagree, find ground truth and fix *both*: don't leave the reader to guess which is current.
 
