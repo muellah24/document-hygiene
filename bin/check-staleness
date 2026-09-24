@@ -12,6 +12,23 @@
 #               "title":"optional"}, ...],
 #    "options":{"volumeThreshold":5,"maxAgeDays":7,"now":"<ISO-8601, optional>"}}
 #
+# Validation is strict, exit 2 with a specific stderr message per violation,
+# checked BEFORE any T1-T4 evaluation (a malformed value anywhere means no
+# rule is evaluated at all, so a broken adapter can never look like a clean
+# project):
+#   - doc must be an object with a string text and a string updatedAt.
+#   - issues must be PRESENT and an array. An empty array is valid (it means
+#     a successfully fetched empty result); missing, null, or false is not.
+#   - every issue needs a string id matching ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$,
+#     a stateType in backlog|unstarted|started|completed|canceled, and string
+#     createdAt/updatedAt.
+#   - options, when present: volumeThreshold must be a positive integer (a
+#     numeric type, not a numeric string like "5"), maxAgeDays a positive
+#     number, now a string.
+#   - every timestamp anywhere in the input (doc.updatedAt, every issue's
+#     createdAt and updatedAt including canceled issues, and options.now) is
+#     parsed and calendar-checked up front; one bad date anywhere is exit 2.
+#
 # stateType is one of backlog, unstarted, started, completed, canceled
 # (Linear's vocabulary; a recipe maps its own tool's statuses onto this set).
 #
@@ -21,22 +38,26 @@
 #    "counts":{"changedSinceDoc":7,"newUnreferenced":5,"docAgeDays":1}}
 #
 # Exit 0 on a normal evaluation (fire or no fire). Exit 2 on malformed input,
-# a missing/regex-incapable jq, or a value jq could not parse (e.g. a
-# timestamp that isn't ISO-8601), with a message on stderr in every case.
-# --quiet prints only the literal string "fire" or "no fire" instead of the
-# full JSON object (still exit 0/2 as above).
+# a missing/regex-incapable jq, or a value that fails validation, with a
+# message on stderr in every case (one line per violation when input fails
+# strict validation). --quiet prints only the literal string "fire" or
+# "no fire" instead of the full JSON object (still exit 0/2 as above).
 #
 # The four rules:
 #   T1  status mismatch: an issue ID referenced in the doc text whose current
-#       stateType disagrees with the status wording on the same line as the
-#       ID. Word classes: unstarted = planned, not started, todo, to do,
-#       backlog, not yet, upcoming, later; started = in progress, started,
-#       ongoing, wip, building, in review; completed = done, shipped, live,
-#       merged, completed, released.
+#       stateType disagrees with the status wording in the SAME CLAUSE as the
+#       ID (a line is split into clauses at `,` `;` `|` `.` and table cell
+#       borders; see "Clause-based attribution" below). Word classes:
+#       unstarted = planned, not started, not yet started, to do/todo,
+#       backlog, not yet, upcoming; started = in progress, started, ongoing,
+#       in review; completed = done, shipped, merged, completed, released.
+#       (Generic standalone words "live", "later", "building", and "wip" are
+#       not recognized: see "Design notes" below.)
 #   T1b weaker sub-rule: a referenced issue whose updatedAt is after
 #       doc.updatedAt and whose stateType is started or completed, with NO
-#       status word on ANY of its referencing lines. Reported separately from
-#       T1, once per issue (not once per line).
+#       status word (not even an ambiguous one) on ANY of its referencing
+#       lines. Reported separately from T1, once per issue (not once per
+#       line).
 #   T2  volume: at least volumeThreshold (default 5) non-canceled issues with
 #       updatedAt after doc.updatedAt.
 #   T3  age: doc.updatedAt older than maxAgeDays (default 7) while the
@@ -46,38 +67,72 @@
 #       doc.updatedAt whose ID does not appear anywhere in the doc text
 #       (plain mentions and IDs embedded in a URL both count as a reference).
 #
+# Shared reference matcher: T1/T1b (via the clause scan) and T4 (the
+# whole-doc-text check) use the exact same matching rule, defined once: an
+# issue's id is escaped literally (no regex metacharacters interpreted),
+# matched case-insensitively, with a token boundary on both sides (the
+# character immediately before and after the match must not be a letter,
+# digit, or underscore). This is what lets TECH-1317 match inside a URL like
+# `/issue/tech-1317/`, and stops TECH-1 from matching TECH-1X or TECH-13.
+# Matched doc-side text and known issue ids are both normalised to
+# upper case before comparing.
+#
+# Clause-based attribution: a line is split into clauses at `,` `;` `|`
+# `.` (the last of these also covers markdown table cell borders, since
+# `|`-delimited cells are already a clause split). An ID's status evidence is
+# whatever status word(s) appear in the SAME clause as that ID's own
+# reference. If a clause contains words from two or more different
+# classes, that occurrence is reported as NO T1 (uncertain) rather than
+# picked by priority. A status word inside a URL (anything from `http` to
+# the next whitespace) is never counted: URLs are blanked to same-length
+# whitespace runs before clause-splitting and status-word scanning (which
+# also means a `.` or `,` inside a URL's domain/path never fragments a
+# clause), while ID matching still runs against the ORIGINAL unmasked line
+# so an id embedded in a URL is still found.
+#
 # Design notes:
+#   - Colon is deliberately NOT a clause-splitting character. This is what
+#     keeps the common "- TECH-1317: planned" and "Done: TECH-1" phrasing
+#     working: the label and the ID stay in one clause without needing any
+#     special cross-boundary join rule. `TECH-1: build live preview` reports
+#     no T1 only because "live" and "building" are not recognized status
+#     words (see below), not because of any colon-specific handling; if the
+#     clause instead said "TECH-1: in progress" it would still resolve
+#     normally, same clause, no crossing needed.
+#   - Generic words ("live", "later", "building", "wip") are not treated as
+#     status words at all, even though each is plausible shorthand for a
+#     real status: they are common enough in unrelated prose sharing a line
+#     with an ID ("ship it live to prod", "later this sprint") that treating
+#     them as status evidence produces more false T1 mismatches than real
+#     ones. Every remaining word class member is specific enough that its
+#     appearance next to an ID is a much stronger signal.
+#   - "not started" and "not yet started" are tested as single multi-word
+#     phrases, not as "not" (or "not yet") plus a bare "started": all three
+#     word classes are scanned as ONE combined regex over each clause
+#     (global, non-overlapping), so once one of these phrases matches as a
+#     whole, the bare "started" alternative never gets a chance to
+#     independently match the same characters. This is what keeps a status
+#     of "not started" or "not yet started" resolving to the unstarted class
+#     only, never ambiguously to both unstarted and started.
 #   - Canceled issues are ignored for T2 and T4 only (per spec), not for T1
 #     or the T3 activity check: a cancellation is still an edit to the doc's
 #     "current truth" and still counts as project activity.
-#   - A line with two or more ticket IDs is split at each ID's own match
-#     offset before classifying, so a status word describing one ticket is
-#     never attributed to its neighbour ("TECH-1 done, TECH-2 in progress"
-#     correctly reads TECH-1 as completed and TECH-2 as started, not both as
-#     whichever word class the whole line matched first). The FIRST ID on a
-#     line still sees any text before it (e.g. "Planned: TECH-1"); a status
-#     word written before a NON-first ID on a multi-ID line is attributed to
-#     the ID that precedes it instead, since ticket-then-status is the
-#     ordinary phrasing this rule is built for.
-#   - Word-class priority when a line matches more than one class is
-#     unstarted, then completed, then started, in that order (this also
-#     resolves "not started" containing the substring "started": the
-#     unstarted phrase is checked first, so it does not fall through to the
-#     started class). This is a deliberate simplification, not a claim that
-#     natural language is unambiguous: short generic words ("later", "wip",
-#     "live", "building") can appear in unrelated prose sharing a line with
-#     an ID and will still be read as a status word.
-#   - Dates are compared as portable ISO-8601 conversions done entirely in
-#     jq (fromdateiso8601, after stripping fractional seconds and handling a
-#     numeric UTC offset by hand), never via the shell's `date`, so behavior
-#     is identical on BSD (macOS) and GNU (Linux) without a dispatch branch.
-#     jq's regex support (test/match/scan/capture) needs jq built with
-#     Oniguruma, which is the default for jq 1.6 and newer; a build without
-#     it is probed for and rejected with exit 2 rather than failing deep
-#     inside the filter.
+#   - Every timestamp comparison is portable ISO-8601 conversion done
+#     entirely in jq (a hand-written days-since-epoch calendar calculation,
+#     never the shell's `date`), so behavior is identical on BSD (macOS) and
+#     GNU (Linux) without a dispatch branch, and fractional seconds are kept
+#     in the epoch value (not truncated), so two timestamps a fraction of a
+#     second apart still compare correctly across a boundary. jq's regex
+#     support (test/match/capture, including lookaround) needs jq built with
+#     Oniguruma, the default for jq 1.6 and newer; a build without it is
+#     probed for and rejected with exit 2 rather than failing deep inside the
+#     filter.
 #
-# Requires: bash, jq (1.6+, built with regex/Oniguruma support). No other
-# runtime dependency: this script never makes a network call.
+# Requires: bash, jq (1.6+, built with regex/Oniguruma support, for
+# lookaround assertions, and codepoint-based match offsets; jq 1.7+ is known
+# good, probed rather than assumed for older 1.6.x builds). No other runtime
+# dependency: this script never
+# makes a network call.
 
 set -u
 
@@ -102,6 +157,25 @@ if ! jq -n '"a" | test("a")' >/dev/null 2>&1; then
   exit 2
 fi
 
+# Lookaround (used by the shared reference matcher) is also an
+# Oniguruma feature but worth probing separately: a build with basic regex
+# support but an old/reduced Oniguruma could pass the check above and still
+# fail here with a much more confusing error deep inside issue_alt_re.
+if ! jq -n '"a" | test("(?<!b)a")' >/dev/null 2>&1; then
+  echo "check-staleness: this jq build's regex engine does not support lookaround assertions; need jq 1.6 or newer built with Oniguruma" >&2
+  exit 2
+fi
+
+# match/.offset must count in Unicode codepoints, not bytes: this script
+# slices strings (clause_ranges, mask_urls) by .offset, and a byte-based
+# offset would misattribute every clause and URL span on any line containing
+# a multi-byte character (accented Latin, CJK, emoji). Verified codepoint-
+# based on jq 1.7.1; probed rather than assumed for older 1.6.x builds.
+if [ "$(jq -n '"é." | match("\\.").offset')" != "1" ]; then
+  echo "check-staleness: this jq build reports regex match offsets in bytes, not Unicode codepoints; need a jq build where match(...).offset counts codepoints (jq 1.7+ is known good)" >&2
+  exit 2
+fi
+
 INPUT=$(cat)
 
 if ! printf '%s' "$INPUT" | jq -e . >/dev/null 2>&1; then
@@ -109,51 +183,176 @@ if ! printf '%s' "$INPUT" | jq -e . >/dev/null 2>&1; then
   exit 2
 fi
 
-if ! printf '%s' "$INPUT" | jq -e '
-    (.doc.text? != null)
-    and (.doc.updatedAt? != null)
-    and ((.issues? // []) | type == "array")
-  ' >/dev/null 2>&1; then
-  echo "check-staleness: input missing required fields (doc.text, doc.updatedAt, issues[])" >&2
-  exit 2
-fi
+# --- shared jq definitions (date math, the reference matcher, clause-based
+# classification) used by both the validator and the evaluator below. Kept
+# as a single string (not a separate file) so this script has no
+# path-resolution dependency on where it was copied to (see the root
+# README's Install section: this file is copied to ~/.claude/bin/).
+DEFS='
+def is_leap($y): ($y % 4 == 0) and (($y % 100 != 0) or ($y % 400 == 0));
 
-# The jq filter implementing T1-T4. Kept as a single program string (not a
-# separate .jq file) so this script has no path-resolution dependency on
-# where it was copied to (see the root README's Install section: this file
-# is copied to ~/.claude/hooks/ alongside the two hook scripts).
-FILTER='
-def toepoch:
+def days_in_month($y; $mo):
+  if $mo == 1 then 31 elif $mo == 2 then (if is_leap($y) then 29 else 28 end)
+  elif $mo == 3 then 31 elif $mo == 4 then 30 elif $mo == 5 then 31 elif $mo == 6 then 30
+  elif $mo == 7 then 31 elif $mo == 8 then 31 elif $mo == 9 then 30 elif $mo == 10 then 31
+  elif $mo == 11 then 30 elif $mo == 12 then 31 else 31 end;
+
+# Howard Hinnant days_from_civil: days since 1970-01-01 for a proleptic
+# Gregorian calendar date. $y/$mo/$d are already range-checked by the caller.
+def days_from_civil($y; $mo; $d):
+  ( if $mo <= 2 then $y - 1 else $y end ) as $yy
+  | ( if $yy >= 0 then ($yy / 400 | floor) else (($yy - 399) / 400 | floor) end ) as $era
+  | ( $yy - $era * 400 ) as $yoe
+  | ( if $mo > 2 then $mo - 3 else $mo + 9 end ) as $mp
+  | ( ((153 * $mp + 2) / 5) | floor ) as $mpdays
+  | ( $yoe * 365 + ($yoe / 4 | floor) - ($yoe / 100 | floor) + $mpdays + ($d - 1) ) as $doy
+  | ( $era * 146097 + $doy - 719468 );
+
+# Parses an ISO-8601-ish timestamp shape into its components, or null if the
+# overall shape does not match at all. Accepts: a bare date (YYYY-MM-DD,
+# midnight UTC), Z, a numeric offset with or without a colon
+# (+02:00 / +0200 / -0530), and optional fractional seconds.
+def parse_ts:
   . as $s
-  | ($s | sub("\\.[0-9]+"; "")) as $n
-  | if ($n | test("Z$")) then
-      ($n | fromdateiso8601)
-    elif ($n | test("[+-][0-9]{2}:?[0-9]{2}$")) then
-      ($n | capture("^(?<base>.*)(?<sign>[+-])(?<oh>[0-9]{2}):?(?<om>[0-9]{2})$")) as $c
-      | (($c.base + "Z") | fromdateiso8601) as $ep
-      | (($c.oh | tonumber) * 3600 + ($c.om | tonumber) * 60) as $off
-      | (if $c.sign == "+" then $ep - $off else $ep + $off end)
-    else
-      (($n + "Z") | fromdateiso8601)
+  | if ($s | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?$") | not)
+    then null
+    else $s | capture("^(?<y>[0-9]{4})-(?<mo>[0-9]{2})-(?<d>[0-9]{2})(T(?<h>[0-9]{2}):(?<mi>[0-9]{2}):(?<s>[0-9]{2})(?<frac>\\.[0-9]+)?(?<off>Z|[+-][0-9]{2}:?[0-9]{2})?)?$")
     end;
 
-def unstarted_re: "\\b(planned|not started|to ?do|backlog|not yet|upcoming|later)\\b";
-def completed_re: "\\b(done|shipped|live|merged|completed|released)\\b";
-def started_re:   "\\b(in progress|started|ongoing|wip|building|in review)\\b";
+# {epoch: <number>} on success, {error: "<reason>"} on failure. Never raises,
+# so both the validator (which reports the error) and the evaluator (which
+# only ever calls this after validation has passed) can use it safely.
+def validate_and_epoch:
+  . as $raw
+  | parse_ts as $p
+  | if $p == null then {error: "not a valid ISO-8601 timestamp (expected YYYY-MM-DD, optionally with THH:MM:SS, fractional seconds, and Z or a numeric UTC offset)"}
+    else
+      ($p.y | tonumber) as $y
+      | ($p.mo | tonumber) as $mo
+      | ($p.d | tonumber) as $d
+      | (if $p.h == null then 0 else ($p.h | tonumber) end) as $h
+      | (if $p.mi == null then 0 else ($p.mi | tonumber) end) as $mi
+      | (if $p.s == null then 0 else ($p.s | tonumber) end) as $sec
+      | (if $p.frac == null then 0 else (("0" + $p.frac) | tonumber) end) as $frac
+      | ($mo >= 1 and $mo <= 12) as $mo_ok
+      | (if $mo_ok then ($d >= 1 and $d <= days_in_month($y; $mo)) else false end) as $d_ok
+      | ($h >= 0 and $h <= 23) as $h_ok
+      | ($mi >= 0 and $mi <= 59) as $mi_ok
+      | ($sec >= 0 and $sec <= 59) as $s_ok
+      | if ([$mo_ok, $d_ok, $h_ok, $mi_ok, $s_ok] | all) | not then
+          {error: "impossible calendar date or time"}
+        else
+          ( if $p.off == null or $p.off == "Z" then {ok: true, offsec: 0}
+            else
+              ($p.off | capture("^(?<sign>[+-])(?<oh>[0-9]{2}):?(?<om>[0-9]{2})$")) as $oc
+              | ($oc.oh | tonumber) as $oh
+              | ($oc.om | tonumber) as $om
+              | if ($oh * 60 + $om) > (14 * 60) or $om > 59 then {ok: false}
+                else {ok: true, offsec: (($oh * 3600 + $om * 60) * (if $oc.sign == "+" then 1 else -1 end))}
+                end
+            end
+          ) as $offres
+          | if ($offres.ok | not) then {error: "UTC offset out of range (-14:00..+14:00)"}
+            else
+              (days_from_civil($y; $mo; $d)) as $days
+              | {epoch: ($days * 86400 + $h * 3600 + $mi * 60 + $sec + $frac - $offres.offsec)}
+            end
+        end
+    end;
 
-def first_match($re):
-  ([match($re; "i")]) as $ms
-  | if ($ms | length) > 0 then $ms[0].string else null end;
+def toepoch:
+  validate_and_epoch as $r
+  | if $r.error then error($r.error) else $r.epoch end;
 
-def classify_line:
-  . as $line
-  | ($line | first_match(unstarted_re)) as $u
-  | ($line | first_match(completed_re)) as $c
-  | ($line | first_match(started_re))   as $s
-  | if $u != null then {class: "unstarted", word: $u}
-    elif $c != null then {class: "completed", word: $c}
-    elif $s != null then {class: "started", word: $s}
+# --- shared reference matcher: one boundary+escaping scheme used by
+# T1/T1b (via line_occurrences below) and T4. ---
+
+def esc_regex:
+  gsub("(?<c>[\\\\.^$|?*+()\\[\\]{}])"; "\\\(.c)");
+
+# Wraps an already-built (already-escaped, alternation-ready) regex core with
+# the token-boundary lookaround: the character immediately before and after
+# the match must not be a letter, digit, or underscore. The single place
+# both id_boundary_re (one id) and issue_alt_re (many ids, alternated) apply
+# the boundary, so there is exactly one boundary rule, not two copies of it.
+def wrap_boundary($core):
+  "(?<![A-Za-z0-9_])(?:" + $core + ")(?![A-Za-z0-9_])";
+
+def id_boundary_re($id):
+  wrap_boundary($id | esc_regex);
+
+def references_id($text; $id):
+  $text | test(id_boundary_re($id); "i");
+
+def issue_alt_re($issues):
+  ($issues | map(.id | esc_regex) | sort_by(-(length)) | join("|")) as $alt
+  | wrap_boundary($alt);
+
+# --- clause-based T1 attribution ---
+
+def repeat_char($c; $n): if $n <= 0 then "" else ([range(0; $n) | $c] | join("")) end;
+
+# Blanks out (with spaces, length-preserved) every run from "http" to the
+# next whitespace, so status words inside a URL are never matched and a
+# delimiter char inside a URL never fragments a clause, while an ID inside
+# the URL is still found by matching against the ORIGINAL (unmasked) line.
+def mask_urls:
+  . as $s
+  | ([match("http\\S*"; "g")]) as $ms
+  | reduce $ms[] as $m
+      ($s;
+        .[0:$m.offset] + repeat_char(" "; ($m.string | length)) + .[($m.offset + ($m.string | length)):]);
+
+# "not (?:yet )?started" comes before the bare "not yet" alternative in this
+# list so "not yet started" is consumed as one match: if "not yet" were tried
+# and matched first, the scan would continue past it and separately match
+# the bare "started" from started_words, reintroducing the exact "not
+# started" vs "started" ambiguity this file exists to prevent.
+def unstarted_words: ["planned", "not (?:yet )?started", "to ?do", "backlog", "not yet", "upcoming"];
+def completed_words: ["done", "shipped", "merged", "completed", "released"];
+def started_words: ["in progress", "started", "ongoing", "in review"];
+
+# One combined pass over all three classes: this is what makes "not started"
+# resolve cleanly to unstarted only (see Design notes above) instead of also
+# matching a bare "started" independently.
+def status_word_re:
+  "\\b(?:" + ((unstarted_words + completed_words + started_words) | join("|")) + ")\\b";
+
+def class_of_word($w):
+  ($w | ascii_downcase) as $lw
+  | if ($lw | test("^(?:" + (unstarted_words | join("|")) + ")$")) then "unstarted"
+    elif ($lw | test("^(?:" + (completed_words | join("|")) + ")$")) then "completed"
+    elif ($lw | test("^(?:" + (started_words | join("|")) + ")$")) then "started"
     else null end;
+
+def clause_breaks($masked_line):
+  [$masked_line | match("[,;|.]"; "g") | .offset];
+
+def clause_ranges($breaks; $len):
+  ([0] + ($breaks | map(. + 1))) as $starts
+  | ($breaks + [$len]) as $ends
+  | [range(0; ($starts | length)) as $i | {start: $starts[$i], end: $ends[$i]}];
+
+def clause_containing($o; $ranges):
+  ($ranges | map(select(.start <= $o and $o < .end)) | first) // {start: $o, end: $o};
+
+# null (no status word in the clause), {class, word} (exactly one class
+# present), or {class: null, ambiguous: true} (two or more classes present:
+# this reports NO T1 for the occurrence, never picked by
+# priority).
+def classify_clause($text):
+  ([$text | match(status_word_re; "gi")]) as $ms
+  | ($ms | map({word: .string, class: class_of_word(.string)})) as $classified
+  | ($classified | map(.class) | unique) as $classes
+  | if ($classes | length) == 0 then null
+    elif ($classes | length) == 1 then
+      ($classified | map(select(.class == $classes[0])) | first) as $first
+      | {class: $classes[0], word: $first.word}
+    else {class: null, ambiguous: true}
+    end;
+
+def trim:
+  sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
 
 def allowed_state_types($class):
   if $class == "unstarted" then ["backlog", "unstarted"]
@@ -161,32 +360,46 @@ def allowed_state_types($class):
   elif $class == "started" then ["started"]
   else [] end;
 
-def trim:
-  sub("^[ \t]+"; "") | sub("[ \t]+$"; "");
-
+# One occurrence per (line, ID-match) pair. cls is the classify_clause
+# result for the CLAUSE containing that specific match: this is what T1
+# uses (clause-scoped attribution). linehasword is the classify_clause
+# result for the WHOLE line instead (any status word anywhere on the line,
+# from any class, including an ambiguous one): this is what T1b uses. The
+# T1b rule (no status word at all on ANY line that mentions the issue) is a
+# line-wide check; only T1 attribution of a word to a specific ID is
+# clause-scoped. A line like "TICK-9, in progress" therefore has
+# linehasword true for TICK-9 (T1b does not fire) even though T1 correctly
+# refuses to attribute "in progress" to TICK-9 across the comma clause break.
 def line_occurrences($doc; $issues):
-  ($doc.text | split("\n")) as $lines
-  | ($issues | INDEX(.id)) as $byid
-  | [ range(0; ($lines | length)) as $li
-      | $lines[$li] as $line
-      | ([$line | match("[A-Z][A-Z0-9]+-[0-9]+"; "g")]) as $ms
-      | range(0; ($ms | length)) as $mi
-      | $ms[$mi] as $m
-      | ($m.string) as $id
-      | $byid[$id] as $iss
-      | select($iss != null)
-      | (if $mi == 0 then 0 else $m.offset end) as $startpos
-      | (if ($mi + 1) < ($ms | length) then $ms[$mi + 1].offset else ($line | length) end) as $endpos
-      | ($line[$startpos:$endpos]) as $segment
-      | {id: $id, line: ($line | trim), cls: ($segment | classify_line), iss: $iss}
-    ];
+  if ($issues | length) == 0 then []
+  else
+    ($doc.text | split("\n")) as $lines
+    | ($issues | map({key: (.id | ascii_upcase), value: .}) | from_entries) as $byid
+    | (issue_alt_re($issues)) as $idre
+    | [ range(0; ($lines | length)) as $li
+        | $lines[$li] as $line
+        | ($line | mask_urls) as $masked
+        | (clause_breaks($masked)) as $breaks
+        | (clause_ranges($breaks; ($line | length))) as $ranges
+        | (classify_clause($masked) != null) as $linehasword
+        | ([$line | match($idre; "gi")]) as $ms
+        | range(0; ($ms | length)) as $mi
+        | $ms[$mi] as $m
+        | ($m.string | ascii_upcase) as $upid
+        | $byid[$upid] as $iss
+        | select($iss != null)
+        | (clause_containing($m.offset; $ranges)) as $cr
+        | ($masked[$cr.start:$cr.end]) as $clausetext
+        | {id: $iss.id, line: ($line | trim), cls: classify_clause($clausetext), linehasword: $linehasword, iss: $iss}
+      ]
+  end;
 
 def t1_reasons($occurrences):
   [ $occurrences[]
-    | select(.cls != null)
+    | select(.cls != null and .cls.class != null)
     | . as $occ
     | select((allowed_state_types($occ.cls.class) | index($occ.iss.stateType)) == null)
-    | {rule: "T1", issue: $occ.id, detail: ("line says " + ($occ.cls.word | ascii_downcase) + ", issue is " + $occ.iss.stateType), line: $occ.line}
+    | {rule: "T1", issue: $occ.id, detail: ("line says " + $occ.cls.word + " (" + $occ.cls.class + "), issue is " + $occ.iss.stateType), line: $occ.line}
   ];
 
 def t1b_reasons($occurrences; $doc_epoch):
@@ -194,14 +407,117 @@ def t1b_reasons($occurrences; $doc_epoch):
     | group_by(.id)[]
     | . as $grp
     | $grp[0].iss as $iss
-    | select(all($grp[]; .cls == null))
+    | select(all($grp[]; .linehasword | not))
     | select((($iss.updatedAt | toepoch) > $doc_epoch) and ($iss.stateType == "started" or $iss.stateType == "completed"))
     | {rule: "T1b", issue: $grp[0].id, detail: ("issue updated after the doc and is " + $iss.stateType + ", but no referencing line has a status word"), line: $grp[0].line}
   ];
+'
 
+# --- strict input validation ---
+
+VALIDATE='
+def ts_error($label; $val):
+  if ($val | type) != "string" then []
+  else
+    ($val | validate_and_epoch) as $r
+    | if $r.error then [$label + " (\"" + $val + "\"): " + $r.error] else [] end
+  end;
+
+def issue_errors($i; $iss):
+  ("issues[" + ($i | tostring) + "]") as $p
+  | if ($iss | type) != "object" then [$p + ": must be an object"]
+    else
+      ( if ($iss.id | type) != "string" then [$p + ".id: must be a string"]
+        elif ($iss.id | test("^[A-Za-z][A-Za-z0-9_]*-[0-9]+$") | not) then
+          [$p + ".id (\"" + ($iss.id | tostring) + "\"): must match ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$"]
+        else [] end )
+      + ( if ($iss.stateType | type) != "string" then [$p + ".stateType: must be a string"]
+          elif (["backlog", "unstarted", "started", "completed", "canceled"] | index($iss.stateType)) == null then
+            [$p + ".stateType (\"" + ($iss.stateType | tostring) + "\"): must be one of backlog|unstarted|started|completed|canceled"]
+          else [] end )
+      + ( if ($iss.createdAt | type) != "string" then [$p + ".createdAt: must be a string"]
+          else ts_error($p + ".createdAt"; $iss.createdAt) end )
+      + ( if ($iss.updatedAt | type) != "string" then [$p + ".updatedAt: must be a string"]
+          else ts_error($p + ".updatedAt"; $iss.updatedAt) end )
+    end;
+
+def options_errors($opts):
+  if $opts == null then []
+  elif ($opts | type) != "object" then ["options: must be an object"]
+  else
+    ( if ($opts | has("volumeThreshold")) then
+        ( ($opts.volumeThreshold) as $v
+          | if ($v | type) != "number" or ($v != ($v | floor)) or $v <= 0 then
+              ["options.volumeThreshold: must be a positive integer"]
+            else [] end )
+      else [] end )
+    + ( if ($opts | has("maxAgeDays")) then
+          ( ($opts.maxAgeDays) as $v
+            | if ($v | type) != "number" or $v <= 0 then
+                ["options.maxAgeDays: must be a positive number"]
+              else [] end )
+        else [] end )
+    + ( if ($opts | has("now")) then
+          ( if ($opts.now | type) != "string" then ["options.now: must be a string"]
+            else ts_error("options.now"; $opts.now) end )
+        else [] end )
+  end;
+
+# Returns an array of error strings; empty means valid. Every parent type is
+# checked before its fields are touched, so a non-object doc/options/issue
+# can never make a jq `?` silently swallow the whole error list: a
+# non-object parent produces its own single error and skips the fields under
+# it, rather than emitting no errors at all and falling through to fire:false).
+def input_errors:
+  if (type != "object") then ["input: must be a JSON object"]
+  else
+    ( if (has("doc") | not) or (.doc | type) != "object" then ["doc: must be an object"]
+      else
+        ( if (.doc | has("text") | not) or (.doc.text | type) != "string" then ["doc.text: must be a string"] else [] end )
+        + ( if (.doc | has("updatedAt") | not) or (.doc.updatedAt | type) != "string" then ["doc.updatedAt: must be a string"]
+            else ts_error("doc.updatedAt"; .doc.updatedAt) end )
+      end )
+    + ( if (has("issues") | not) then ["issues: must be present (an empty array [] is valid; missing/null/false is not)"]
+        elif (.issues | type) != "array" then ["issues: must be an array"]
+        else [ .issues | to_entries[] | issue_errors(.key; .value) ] | flatten
+        end )
+    + ( if (has("options")) then options_errors(.options) else [] end )
+  end;
+
+input_errors
+'
+
+ERR_FILE=$(mktemp)
+ERRORS=$(printf '%s' "$INPUT" | jq -c "${DEFS}${VALIDATE}" 2>"$ERR_FILE")
+RC=$?
+if [ "$RC" -ne 0 ]; then
+  echo "check-staleness: input validation failed to run: $(cat "$ERR_FILE")" >&2
+  rm -f "$ERR_FILE"
+  exit 2
+fi
+rm -f "$ERR_FILE"
+
+# input_errors always yields exactly one JSON array; a non-array result would
+# mean the validator itself is broken, so fail closed rather than proceed.
+if ! printf '%s' "$ERRORS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "check-staleness: input validation returned an unexpected shape (this is a bug in check-staleness itself)" >&2
+  exit 2
+fi
+
+ERROR_COUNT=$(printf '%s' "$ERRORS" | jq 'length')
+if [ "$ERROR_COUNT" -gt 0 ]; then
+  while IFS= read -r -d '' line; do
+    echo "check-staleness: $line" >&2
+  done < <(printf '%s' "$ERRORS" | jq -j '.[] | . + "\u0000"')
+  exit 2
+fi
+
+# --- evaluation (T1-T4) ---
+
+FILTER='
 . as $input
 | $input.doc as $doc
-| ($input.issues // []) as $issues
+| ($input.issues) as $issues
 | ($input.options // {}) as $options
 | ($options.volumeThreshold // 5) as $volThresh
 | ($options.maxAgeDays // 7) as $maxAgeDays
@@ -211,7 +527,7 @@ def t1b_reasons($occurrences; $doc_epoch):
 | ($active | map(select((.updatedAt | toepoch) > $doc_epoch))) as $changed
 | ($active | map(select(
     (.createdAt | toepoch) > $doc_epoch
-    and (.id as $iid | ($doc.text | test("\\b" + $iid + "\\b")) | not)
+    and (references_id($doc.text; .id) | not)
   ))) as $unref
 | ((($now_epoch - $doc_epoch) / 86400) | floor) as $docAgeDays
 | (($now_epoch - $doc_epoch) > ($maxAgeDays * 86400)) as $doc_old
@@ -240,7 +556,7 @@ def t1b_reasons($occurrences; $doc_epoch):
 '
 
 ERR_FILE=$(mktemp)
-RESULT=$(printf '%s' "$INPUT" | jq -c "$FILTER" 2>"$ERR_FILE")
+RESULT=$(printf '%s' "$INPUT" | jq -c "${DEFS}${FILTER}" 2>"$ERR_FILE")
 RC=$?
 if [ "$RC" -ne 0 ]; then
   echo "check-staleness: evaluation failed: $(cat "$ERR_FILE")" >&2

@@ -71,17 +71,36 @@ Everything above assumes the document is a file an agent can re-read and edit di
 
 | Rule | Fires when |
 |---|---|
-| T1 (status mismatch) | An issue ID referenced in the doc text whose current stateType disagrees with the status wording on the same line as the ID (unstarted / started / completed word classes). |
-| T1b (weaker: silent drift) | A referenced issue updated after the doc, now started or completed, with no status word at all on any line that mentions it. |
+| T1 (status mismatch) | An issue ID referenced in the doc text whose current stateType disagrees with the status wording in the SAME CLAUSE as the ID (a line is split into clauses at `,` `;` `\|` `.` and table cell borders; unstarted / started / completed word classes). |
+| T1b (weaker: silent drift) | A referenced issue updated after the doc, now started or completed, with no status word (not even an ambiguous one) at all on any line that mentions it. |
 | T2 (volume) | At least N issues (default 5) updated after the doc's own updatedAt. |
 | T3 (age) | The doc is older than X days (default 7) while the project is still active. |
 | T4 (unreferenced new work) | Issues created after the doc's updatedAt whose ID never appears in the doc text. |
 
-`bin/check-staleness` (bash and `jq`, no other dependency) implements this evaluator, tool-independently: it reads one JSON object (the doc's text and updatedAt, plus an issues array) on stdin and reports which rules fired and why. A per-tool recipe only has to produce that JSON; it never re-implements the rules. `skills/document-hygiene/references/` has worked recipes for Linear, Jira, and a generic template for any other tool.
+`bin/check-staleness` (bash and `jq`, no other dependency) implements this evaluator, tool-independently: it reads one JSON object (the doc's text and updatedAt, plus an issues array) on stdin and reports which rules fired and why. A per-tool recipe only has to produce that JSON; it never re-implements the rules. Input is validated strictly (exit 2, one stderr line per violation, before any rule runs): `issues` must be present and an array (an empty array is a valid, successfully-fetched empty result; missing/null/false is not), every issue id must match `^[A-Za-z][A-Za-z0-9_]*-[0-9]+$`, every stateType must be one of the five listed above, and every timestamp anywhere in the input is calendar-checked up front. `skills/document-hygiene/references/` has worked recipes for Linear, Jira, and a generic template for any other tool.
+
+**Manual check, no scheduler needed.** The evaluator runs standalone from a terminal at any time; a recurring trigger is an optional convenience, not a prerequisite. Adjust the path below to wherever `bin/check-staleness` was placed for the agent this procedure is running under (a Claude Code install typically keeps it at `~/.claude/bin/check-staleness`; a repo checkout uses `bin/check-staleness` from the repo root):
+```bash
+printf '%s' '{"doc":{"text":"- TECH-1: planned","updatedAt":"2026-09-01"},
+"issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-01-01","updatedAt":"2026-09-10"}]}' \
+  | bin/check-staleness
+```
 
 **Checklist**, once the trigger fires (or on explicit request): status words in the doc against each referenced issue's real status; counts and lists in the doc against the ticket that defines them; a "not yet ticketed" or "planned, no ticket" list against issues that already exist; decisions recorded in the doc against later run reports or completed-ticket outcomes; and names (models, columns, classes, tools) against whatever the most recently completed ticket actually shipped.
 
 **Propose only, delivered as a comment.** Apply mode does not exist for a PM doc: there is no git undo there, so every PM-doc reconciliation runs in propose mode regardless of the agent's configured mode. The result is delivered as a comment on the document or project (every PM tool has comments), never written into the doc itself.
+
+**Skip a repeat comment (duplicate suppression).** Evaluation is stateless (T1-T4 are recomputed fresh every run), but delivery must not repeat itself on an unchanged result. Before posting, compute a fingerprint of what would be posted: the first 12 hex characters of the SHA-256 of `doc.updatedAt` plus the sorted, unique `rule:issue` pairs from `.reasons` (never the free-text `detail`, since a count or an age in days changes daily even when nothing meaningful did):
+```bash
+CHECK_STALENESS_RESULT=$(printf '%s' "$EVALUATOR_INPUT_JSON" | bin/check-staleness)
+FP_SRC=$(jq -r --arg d "$DOC_UPDATED_AT" \
+  '$d + "|" + (([.reasons[] | .rule + ":" + (.issue // "")] | unique | sort) | join(","))' \
+  <<< "$CHECK_STALENESS_RESULT")
+FINGERPRINT=$(printf '%s' "$FP_SRC" | { shasum -a 256 2>/dev/null || sha256sum; } | cut -c1-12)
+```
+(`$EVALUATOR_INPUT_JSON` and `$DOC_UPDATED_AT` are the same values used to build and run the trigger check itself; this snippet reuses that same run's result rather than calling `bin/check-staleness` a second time.) Append `hygiene-fingerprint: <hash>` as the last line of the comment. Before posting, list the existing comments on the doc or project and skip posting if one already contains that exact fingerprint line (a substring check, not an exact-suffix check: a returned comment body can carry trailing whitespace or a trailing newline).
+
+**Two separate authorisations.** Permission to run a scheduled check (read-only) and permission to post a comment (a message sent on the user's behalf) are separate; neither implies the other. Running the check on a schedule needs only the first; confirm the second explicitly before the first comment-post call.
 
 **Scheduling is offered, never created unasked.** Wiring the check to a clock or an event (a scheduled job, a webhook, an agent mention inside the PM tool) is host-specific and is not built into this procedure. The first time a PM-doc check runs manually for a given project, offer to set up a recurring check on whichever mechanism the host supports, and wait for a yes before creating anything.
 

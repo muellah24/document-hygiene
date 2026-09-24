@@ -16,20 +16,36 @@ FAILS=0
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1"; FAILS=$((FAILS + 1)); }
 
-# run_cs <json>: runs check-staleness on the given JSON, prints its stdout,
-# and sets $CS_RC to its exit code (checked by callers via $?  semantics
-# through a captured variable, since this runs in the current shell).
+# run_cs <json>: runs check-staleness on the given JSON. Sets $out to stdout
+# and $rc to the exit code every time, so every case below can assert both
+# the exit code and the JSON shape, not just one field of it.
 run_cs() {
-  printf '%s' "$1" | "$CS"
+  out=$(printf '%s' "$1" | "$CS")
+  rc=$?
 }
 run_cs_quiet() {
-  printf '%s' "$1" | "$CS" --quiet
+  out=$(printf '%s' "$1" | "$CS" --quiet)
+  rc=$?
 }
 
 jqget() {
   # jqget <json-output> <filter>
   printf '%s' "$1" | jq -r "$2" 2>/dev/null
 }
+
+# ok_success: true when the last run_cs call exited 0 and printed non-empty,
+# well-formed JSON. Every success-path case below is gated on this, per FIX
+# F5 ("every case must assert successful execution"), not only its own field.
+ok_success() {
+  [ "$rc" -eq 0 ] && [ -n "$out" ] && printf '%s' "$out" | jq -e . >/dev/null 2>&1
+}
+
+# ok_exit2 <expect-substring>: true when the last run_cs call exited 2 with a
+# non-empty stderr-shaped message. Since run_cs only captures stdout, callers
+# that need exit-2 cases capture stderr explicitly (see below) rather than
+# using this helper directly for the message text; this helper is here for
+# the common "just check rc==2" shape reused by several cases.
+ok_exit2() { [ "$rc" -eq 2 ]; }
 
 # --- syntax check -------------------------------------------------------------
 
@@ -61,13 +77,15 @@ read -r -d '' CASE1 <<'EOF' || true
   "options": {"now": "2026-09-24T05:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE1")
+run_cs "$CASE1"
 fire=$(jqget "$out" '.fire')
 rules=$(jqget "$out" '[.reasons[].rule] | unique | sort | join(",")')
-if [ "$fire" = "true" ] && [ "$rules" = "T1,T2,T4" ]; then
-  pass "case1: 2026-09-24 reconstruction fires T1+T2+T4, not T3"
+t1_ids_classes=$(jqget "$out" '[.reasons[] | select(.rule=="T1") | .issue + ":" + (.detail | capture("\\((?<c>[a-z]+)\\)").c)] | sort | join(",")')
+if ok_success && [ "$fire" = "true" ] && [ "$rules" = "T1,T2,T4" ] \
+   && [ "$t1_ids_classes" = "TECH-1317:unstarted,TECH-1323:unstarted" ]; then
+  pass "case1: 2026-09-24 reconstruction fires T1+T2+T4 (TECH-1317 and TECH-1323, both class unstarted), not T3"
 else
-  fail "case1: 2026-09-24 reconstruction fires T1+T2+T4, not T3 (fire=$fire rules=$rules out=$out)"
+  fail "case1: 2026-09-24 reconstruction fires T1+T2+T4 (TECH-1317 and TECH-1323, both class unstarted), not T3 (rc=$rc fire=$fire rules=$rules t1=$t1_ids_classes out=$out)"
 fi
 
 # --- case 2: a current doc -> no fire ----------------------------------------
@@ -79,47 +97,98 @@ read -r -d '' CASE2 <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE2")
+run_cs "$CASE2"
 fire=$(jqget "$out" '.fire')
-if [ "$fire" = "false" ]; then
+if ok_success && [ "$fire" = "false" ]; then
   pass "case2: current doc does not fire"
 else
-  fail "case2: current doc does not fire (got: $out)"
+  fail "case2: current doc does not fire (rc=$rc got: $out)"
 fi
 
 # --- case 3: T1 word-class mismatch, one per class ---------------------------
 
 check_t1_class() {
-  # check_t1_class <label> <line_word> <actual_stateType> <expected_detail_word>
-  label="$1"; word="$2"; state="$3"
+  # check_t1_class <label> <line_word> <actual_stateType> <expected_class>
+  label="$1"; word="$2"; state="$3"; expect_class="${4:-}"
   json=$(printf '{"doc":{"text":"- TICK-1: %s\\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"%s","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-21T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}' "$word" "$state")
-  out=$(run_cs "$json")
+  run_cs "$json"
   rule=$(jqget "$out" '.reasons[0].rule // "none"')
-  if [ "$rule" = "T1" ]; then
-    pass "case3 ($label): '$word' vs stateType=$state fires T1"
+  issue=$(jqget "$out" '.reasons[0].issue // "none"')
+  detail=$(jqget "$out" '.reasons[0].detail // ""')
+  class_ok=1
+  [ -n "$expect_class" ] && { printf '%s' "$detail" | grep -qF "($expect_class)" || class_ok=0; }
+  if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$class_ok" = "1" ]; then
+    pass "case3 ($label): '$word' vs stateType=$state fires T1 (issue=TICK-1, detail names the class)"
   else
-    fail "case3 ($label): '$word' vs stateType=$state fires T1 (got: $out)"
+    fail "case3 ($label): '$word' vs stateType=$state fires T1 (rc=$rc got: $out)"
   fi
 }
 # unstarted word, issue actually completed
-check_t1_class "unstarted-word" "planned" "completed"
+check_t1_class "unstarted-word" "planned" "completed" "unstarted"
 # started word, issue actually completed
-check_t1_class "started-word" "in progress" "completed"
+check_t1_class "started-word" "in progress" "completed" "started"
 # completed word, issue actually started
-check_t1_class "completed-word" "done" "started"
+check_t1_class "completed-word" "done" "started" "completed"
 
 # A word from every unstarted synonym should classify as unstarted (spot check
-# a few, not just "planned"): backlog, not yet, upcoming, later, todo, to do.
-for w in "backlog" "not yet" "upcoming" "later" "todo" "to do" "not started"; do
-  json=$(printf '{"doc":{"text":"- TICK-1: %s\\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-21T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}' "$w")
-  out=$(run_cs "$json")
-  rule=$(jqget "$out" '.reasons[0].rule // "none"')
-  if [ "$rule" = "T1" ]; then
-    pass "case3 (unstarted synonym '$w'): classified unstarted, mismatches completed"
-  else
-    fail "case3 (unstarted synonym '$w'): classified unstarted, mismatches completed (got: $out)"
-  fi
+# a few, not just "planned"): backlog, not yet, upcoming, todo, to do,
+# not started. "later" is deliberately NOT in this list any more (FIX F4
+# dropped it, along with "live", "building", "wip", as generic standalone
+# words too likely to appear in unrelated prose sharing a line with an ID).
+for w in "backlog" "not yet" "upcoming" "todo" "to do" "not started"; do
+  check_t1_class "unstarted synonym '$w'" "$w" "completed" "unstarted"
 done
+
+# case3b: "later" no longer classifies as anything (regression guard for the
+# word actually being dropped, not just absent from the loop above).
+json='{"doc":{"text":"- TICK-1: later\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"unstarted","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-19T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
+run_cs "$json"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case3b: 'later' is no longer a recognized status word (dropped per FIX F4)"
+else
+  fail "case3b: 'later' is no longer a recognized status word (dropped per FIX F4) (rc=$rc got: $out)"
+fi
+
+# case3c: "not started" against an issue that really is unstarted -> no fire.
+json='{"doc":{"text":"- TICK-1: not started\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"unstarted","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-19T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
+run_cs "$json"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case3c: 'not started' vs a genuinely unstarted issue does not fire"
+else
+  fail "case3c: 'not started' vs a genuinely unstarted issue does not fire (rc=$rc got: $out)"
+fi
+
+# case3d: "not started" against an issue that is actually started -> T1 fires,
+# classified unstarted (never ambiguously matching bare "started" too).
+json='{"doc":{"text":"- TICK-1: not started\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"started","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-19T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
+run_cs "$json"
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+n=$(jqget "$out" '.reasons | length')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$n" = "1" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+  pass "case3d: 'not started' vs a started issue fires T1 once on TICK-1, classified unstarted (not ambiguous)"
+else
+  fail "case3d: 'not started' vs a started issue fires T1 once on TICK-1, classified unstarted (not ambiguous) (rc=$rc got: $out)"
+fi
+
+# case3e: "not yet started" is the same ambiguity risk as "not started" (the
+# combined regex could otherwise match "not yet" for unstarted AND a bare
+# "started" for started in the same clause): must resolve cleanly to
+# unstarted only, same as case3d.
+json='{"doc":{"text":"- TICK-1: not yet started\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"completed","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-19T00:00:00Z"}],"options":{"now":"2026-09-24T00:00:00Z"}}'
+run_cs "$json"
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+n=$(jqget "$out" '.reasons | length')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TICK-1" ] && [ "$n" = "1" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+  pass "case3e: 'not yet started' vs a completed issue fires T1 once on TICK-1, classified unstarted (not ambiguous)"
+else
+  fail "case3e: 'not yet started' vs a completed issue fires T1 once on TICK-1, classified unstarted (not ambiguous) (rc=$rc got: $out)"
+fi
 
 # --- case 4: T1b, no status word anywhere for the issue ----------------------
 
@@ -130,16 +199,17 @@ read -r -d '' CASE4 <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE4")
+run_cs "$CASE4"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
-if [ "$rule" = "T1b" ]; then
-  pass "case4: no status word + issue updated after doc fires T1b"
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+if ok_success && [ "$rule" = "T1b" ] && [ "$issue" = "TICK-9" ]; then
+  pass "case4: no status word + issue updated after doc fires T1b on TICK-9"
 else
-  fail "case4: no status word + issue updated after doc fires T1b (got: $out)"
+  fail "case4: no status word + issue updated after doc fires T1b on TICK-9 (rc=$rc got: $out)"
 fi
 
 # case 4b: T1b is suppressed when ANOTHER line about the same issue does carry
-# a (matching) status word -- one reason per issue, not per line.
+# a (matching) status word: one reason per issue, not per line.
 read -r -d '' CASE4B <<'EOF' || true
 {
   "doc": {"text": "See TICK-9 for details.\nTICK-9 is in progress.\n", "updatedAt": "2026-09-23T00:00:00Z"},
@@ -147,12 +217,12 @@ read -r -d '' CASE4B <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE4B")
+run_cs "$CASE4B"
 fire=$(jqget "$out" '.fire')
-if [ "$fire" = "false" ]; then
+if ok_success && [ "$fire" = "false" ]; then
   pass "case4b: T1b suppressed when another line about the same issue has a matching status word"
 else
-  fail "case4b: T1b suppressed when another line about the same issue has a matching status word (got: $out)"
+  fail "case4b: T1b suppressed when another line about the same issue has a matching status word (rc=$rc got: $out)"
 fi
 
 # case 4c: T1b never fires twice for the same issue even when it is referenced
@@ -164,12 +234,34 @@ read -r -d '' CASE4C <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE4C")
+run_cs "$CASE4C"
 n=$(jqget "$out" '[.reasons[] | select(.rule=="T1b")] | length')
-if [ "$n" = "1" ]; then
+if ok_success && [ "$n" = "1" ]; then
   pass "case4c: T1b fires exactly once per issue, not once per referencing line"
 else
-  fail "case4c: T1b fires exactly once per issue, not once per referencing line (count=$n, out=$out)"
+  fail "case4c: T1b fires exactly once per issue, not once per referencing line (rc=$rc count=$n, out=$out)"
+fi
+
+# case4d: T1b's "no status word" check stays LINE-scoped even though F4 made
+# T1's attribution clause-scoped. "TICK-9, in progress" splits into two
+# clauses at the comma (TICK-9's own clause has no status word), but the
+# line as a whole clearly has one, so T1b must NOT fire here. T1 also
+# correctly does not fire, since "in progress" is not attributed to TICK-9
+# across the clause boundary, but that is a T1 non-finding, not evidence of
+# "no status word at all on this line" for T1b's purposes.
+read -r -d '' CASE4D <<'EOF' || true
+{
+  "doc": {"text": "TICK-9, in progress\n", "updatedAt": "2026-09-23T00:00:00Z"},
+  "issues": [{"id": "TICK-9", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-23T20:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE4D"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case4d: T1b stays line-scoped (a status word elsewhere on the line suppresses it, even across a clause boundary)"
+else
+  fail "case4d: T1b stays line-scoped (a status word elsewhere on the line suppresses it, even across a clause boundary) (rc=$rc got: $out)"
 fi
 
 # --- case 5: T2 volume threshold (default 5) ---------------------------------
@@ -186,22 +278,22 @@ build_issues() {
 }
 issues5=$(build_issues 5)
 json=$(printf '{"doc":{"text":"nothing here\\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":%s,"options":{"now":"2026-09-24T00:00:00Z"}}' "$issues5")
-out=$(run_cs "$json")
+run_cs "$json"
 has_t2=$(jqget "$out" '[.reasons[] | select(.rule=="T2")] | length')
-if [ "$has_t2" = "1" ]; then
+if ok_success && [ "$has_t2" = "1" ]; then
   pass "case5: 5 issues updated since doc meets the default volume threshold"
 else
-  fail "case5: 5 issues updated since doc meets the default volume threshold (got: $out)"
+  fail "case5: 5 issues updated since doc meets the default volume threshold (rc=$rc got: $out)"
 fi
 
 issues4=$(build_issues 4)
 json=$(printf '{"doc":{"text":"nothing here\\n","updatedAt":"2026-09-20T00:00:00Z"},"issues":%s,"options":{"now":"2026-09-24T00:00:00Z"}}' "$issues4")
-out=$(run_cs "$json")
+run_cs "$json"
 fire=$(jqget "$out" '.fire')
-if [ "$fire" = "false" ]; then
+if ok_success && [ "$fire" = "false" ]; then
   pass "case5b: 4 issues (below threshold) does not fire"
 else
-  fail "case5b: 4 issues (below threshold) does not fire (got: $out)"
+  fail "case5b: 4 issues (below threshold) does not fire (rc=$rc got: $out)"
 fi
 
 # --- case 6: T3 age, active vs inactive project ------------------------------
@@ -213,12 +305,12 @@ read -r -d '' CASE6A <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE6A")
+run_cs "$CASE6A"
 has_t3=$(jqget "$out" '[.reasons[] | select(.rule=="T3")] | length')
-if [ "$has_t3" = "1" ]; then
+if ok_success && [ "$has_t3" = "1" ]; then
   pass "case6a: old doc + active project fires T3"
 else
-  fail "case6a: old doc + active project fires T3 (got: $out)"
+  fail "case6a: old doc + active project fires T3 (rc=$rc got: $out)"
 fi
 
 read -r -d '' CASE6B <<'EOF' || true
@@ -228,12 +320,12 @@ read -r -d '' CASE6B <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE6B")
+run_cs "$CASE6B"
 fire=$(jqget "$out" '.fire')
-if [ "$fire" = "false" ]; then
+if ok_success && [ "$fire" = "false" ]; then
   pass "case6b: old doc + inactive project does not fire"
 else
-  fail "case6b: old doc + inactive project does not fire (got: $out)"
+  fail "case6b: old doc + inactive project does not fire (rc=$rc got: $out)"
 fi
 
 # --- case 7: canceled issues ignored for T2/T4 -------------------------------
@@ -251,13 +343,13 @@ read -r -d '' CASE7 <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE7")
+run_cs "$CASE7"
 fire=$(jqget "$out" '.fire')
 counts=$(jqget "$out" '.counts.changedSinceDoc, .counts.newUnreferenced' | tr '\n' ' ')
-if [ "$fire" = "false" ] && [ "$counts" = "0 0 " ]; then
+if ok_success && [ "$fire" = "false" ] && [ "$counts" = "0 0 " ]; then
   pass "case7: canceled issues are excluded from T2/T4 counts and don't fire"
 else
-  fail "case7: canceled issues are excluded from T2/T4 counts and don't fire (fire=$fire counts='$counts' out=$out)"
+  fail "case7: canceled issues are excluded from T2/T4 counts and don't fire (rc=$rc fire=$fire counts='$counts' out=$out)"
 fi
 
 # --- case 8: an ID embedded inside a URL is still matched --------------------
@@ -269,12 +361,14 @@ read -r -d '' CASE8 <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE8")
+run_cs "$CASE8"
 rule=$(jqget "$out" '.reasons[0].rule // "none"')
-if [ "$rule" = "T1" ]; then
-  pass "case8: an ID embedded in a URL is matched and classified"
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1317" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+  pass "case8: an ID embedded in a URL is matched and classified (TECH-1317, unstarted)"
 else
-  fail "case8: an ID embedded in a URL is matched and classified (got: $out)"
+  fail "case8: an ID embedded in a URL is matched and classified (TECH-1317, unstarted) (rc=$rc got: $out)"
 fi
 
 # T4 should also see an ID inside a URL as "referenced" (i.e. NOT unreferenced).
@@ -285,12 +379,49 @@ read -r -d '' CASE8B <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE8B")
+run_cs "$CASE8B"
 newunref=$(jqget "$out" '.counts.newUnreferenced')
-if [ "$newunref" = "0" ]; then
+if ok_success && [ "$newunref" = "0" ]; then
   pass "case8b: an ID inside a URL counts as referenced for T4"
 else
-  fail "case8b: an ID inside a URL counts as referenced for T4 (got: $out)"
+  fail "case8b: an ID inside a URL counts as referenced for T4 (rc=$rc got: $out)"
+fi
+
+# case8c: same as 8b but the ID is lowercased inside the URL (trackers and
+# URLs lowercase identifiers routinely; FIX F3 requires case-insensitive
+# matching for T4 too, not only for T1).
+read -r -d '' CASE8C <<'EOF' || true
+{
+  "doc": {"text": "Tracking at https://example.com/issue/tech-9999/\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-9999", "stateType": "unstarted", "createdAt": "2026-09-21T00:00:00Z", "updatedAt": "2026-09-21T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE8C"
+fire=$(jqget "$out" '.fire')
+newunref=$(jqget "$out" '.counts.newUnreferenced')
+if ok_success && [ "$newunref" = "0" ] && [ "$fire" = "false" ]; then
+  pass "case8c: a lowercased ID inside a URL still counts as referenced for T4 (no fire)"
+else
+  fail "case8c: a lowercased ID inside a URL still counts as referenced for T4 (no fire) (rc=$rc got: $out)"
+fi
+
+# case8d: TECH-1X must NOT match a known TECH-1 (token boundary), so if only
+# TECH-1 is a known issue, a doc that only says "TECH-1X planned" has NOT
+# referenced TECH-1 and carries no status evidence for it either.
+read -r -d '' CASE8D <<'EOF' || true
+{
+  "doc": {"text": "TECH-1X planned\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-1", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE8D"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case8d: 'TECH-1X planned' with only TECH-1 known does not match TECH-1 (token boundary), no fire"
+else
+  fail "case8d: 'TECH-1X planned' with only TECH-1 known does not match TECH-1 (token boundary), no fire (rc=$rc got: $out)"
 fi
 
 # --- case 9: multi-ID line does not cross-contaminate classification --------
@@ -305,16 +436,16 @@ read -r -d '' CASE9 <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE9")
+run_cs "$CASE9"
 fire=$(jqget "$out" '.fire')
-if [ "$fire" = "false" ]; then
-  pass "case9: a two-ID line classifies each ID against its own segment (no cross-contamination)"
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case9: a two-ID line classifies each ID against its own clause (no cross-contamination)"
 else
-  fail "case9: a two-ID line classifies each ID against its own segment (no cross-contamination) (got: $out)"
+  fail "case9: a two-ID line classifies each ID against its own clause (no cross-contamination) (rc=$rc got: $out)"
 fi
 
 # case9b: the mismatching half of a two-ID line still fires T1, proving the
-# segmentation isn't just suppressing everything on a multi-ID line.
+# clause split isn't just suppressing everything on a multi-ID line.
 read -r -d '' CASE9B <<'EOF' || true
 {
   "doc": {"text": "TECH-1 done, TECH-2 in progress\n", "updatedAt": "2026-09-20T00:00:00Z"},
@@ -325,13 +456,14 @@ read -r -d '' CASE9B <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE9B")
+run_cs "$CASE9B"
 t1issue=$(jqget "$out" '.reasons[0].issue // "none"')
 n=$(jqget "$out" '.reasons | length')
-if [ "$n" = "1" ] && [ "$t1issue" = "TECH-1" ]; then
-  pass "case9b: only the actually-mismatched ID on a multi-ID line fires T1"
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$n" = "1" ] && [ "$t1issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case9b: only the actually-mismatched ID on a multi-ID line fires T1, class named in detail"
 else
-  fail "case9b: only the actually-mismatched ID on a multi-ID line fires T1 (got: $out)"
+  fail "case9b: only the actually-mismatched ID on a multi-ID line fires T1, class named in detail (rc=$rc got: $out)"
 fi
 
 # --- case 10: the `now` override is honored ----------------------------------
@@ -343,12 +475,12 @@ read -r -d '' CASE10 <<'EOF' || true
   "options": {"now": "2026-09-02T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE10")
+run_cs "$CASE10"
 docage=$(jqget "$out" '.counts.docAgeDays')
-if [ "$docage" = "1" ]; then
+if ok_success && [ "$docage" = "1" ]; then
   pass "case10: options.now overrides the wall-clock date used for docAgeDays"
 else
-  fail "case10: options.now overrides the wall-clock date used for docAgeDays (got: $out)"
+  fail "case10: options.now overrides the wall-clock date used for docAgeDays (rc=$rc got: $out)"
 fi
 
 # case10b: with no `now` override, docAgeDays is computed against the real
@@ -359,12 +491,12 @@ read -r -d '' CASE10B <<'EOF' || true
   "issues": []
 }
 EOF
-out=$(run_cs "$CASE10B")
+run_cs "$CASE10B"
 docage=$(jqget "$out" '.counts.docAgeDays')
-if [ "${docage:-0}" -gt 300 ] 2>/dev/null; then
+if ok_success && [ "${docage:-0}" -gt 300 ] 2>/dev/null; then
   pass "case10b: with no options.now, docAgeDays is computed against the real wall clock"
 else
-  fail "case10b: with no options.now, docAgeDays is computed against the real wall clock (got: $out)"
+  fail "case10b: with no options.now, docAgeDays is computed against the real wall clock (rc=$rc got: $out)"
 fi
 
 # --- case 11: malformed input exits 2 with a stderr message ------------------
@@ -396,52 +528,172 @@ else
   fail "case11c: an unparsable timestamp exits 2 with a message instead of failing silently (rc=$rc err='$err')"
 fi
 
+# case11d: `issues` missing entirely exits 2 (FIX F1: no longer silently
+# defaulted to [] via `// []`, which used to yield a clean-looking fire:false
+# for what is actually an adapter failure).
+err=$(printf '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00Z"}}' | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -qi 'issues'; then
+  pass "case11d: missing issues exits 2 with a message naming issues"
+else
+  fail "case11d: missing issues exits 2 with a message naming issues (rc=$rc err='$err')"
+fi
+
+# case11e: `issues: null` and `issues: false` both exit 2 too (not only a
+# missing key).
+for badval in 'null' 'false'; do
+  err=$(printf '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00Z"},"issues":%s}' "$badval" | "$CS" 2>&1 1>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -qi 'issues'; then
+    pass "case11e (issues: $badval): exits 2 with a message naming issues"
+  else
+    fail "case11e (issues: $badval): exits 2 with a message naming issues (rc=$rc err='$err')"
+  fi
+done
+
+# case11f: an empty `issues` array is explicitly VALID (a successfully
+# fetched empty result is not the same as a missing/failed fetch).
+run_cs '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00Z"},"issues":[]}'
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case11f: an empty issues array is valid and evaluates cleanly"
+else
+  fail "case11f: an empty issues array is valid and evaluates cleanly (rc=$rc got: $out)"
+fi
+
+# case11g: options.volumeThreshold as a STRING ("5") is rejected, not
+# silently accepted as if it disabled T2.
+err=$(printf '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00Z"},"issues":[],"options":{"volumeThreshold":"5"}}' | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -qi 'volumeThreshold'; then
+  pass "case11g: options.volumeThreshold as a string exits 2 with a message naming it"
+else
+  fail "case11g: options.volumeThreshold as a string exits 2 with a message naming it (rc=$rc err='$err')"
+fi
+
+# case11h: a malformed date on a CANCELED issue is still caught (validation
+# happens up front, before rule filtering, so canceled issues are not
+# exempt just because T2/T4 ignore them).
+err=$(printf '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00Z"},"issues":[{"id":"TICK-1","stateType":"canceled","createdAt":"2026-02-30T00:00:00Z","updatedAt":"2026-09-20T00:00:00Z"}]}' | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -qi 'issues\[0\]'; then
+  pass "case11h: a malformed date on a canceled issue still exits 2"
+else
+  fail "case11h: a malformed date on a canceled issue still exits 2 (rc=$rc err='$err')"
+fi
+
+# case11i: an impossible calendar date (Feb 30) exits 2.
+err=$(printf '{"doc":{"text":"x","updatedAt":"2026-02-30T00:00:00Z"},"issues":[]}' | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && [ -n "$err" ]; then
+  pass "case11i: an impossible calendar date (Feb 30) exits 2"
+else
+  fail "case11i: an impossible calendar date (Feb 30) exits 2 (rc=$rc err='$err')"
+fi
+
+# case11j: an out-of-range UTC offset (+99:99) exits 2.
+err=$(printf '{"doc":{"text":"x","updatedAt":"2026-09-20T00:00:00+99:99"},"issues":[]}' | "$CS" 2>&1 1>/dev/null)
+rc=$?
+if [ "$rc" -eq 2 ] && [ -n "$err" ]; then
+  pass "case11j: an out-of-range UTC offset (+99:99) exits 2"
+else
+  fail "case11j: an out-of-range UTC offset (+99:99) exits 2 (rc=$rc err='$err')"
+fi
+
+# case11k: a date-only doc.updatedAt (no time part) is ACCEPTED (midnight
+# UTC) and agrees with the other instant forms. Folded into case13 below,
+# which gives it the same before/after positive control the other forms get
+# instead of only checking rc.
+
 # --- case 12: --quiet prints only fire/no fire -------------------------------
 
-out=$(run_cs_quiet "$CASE1")
-if [ "$out" = "fire" ]; then
+run_cs_quiet "$CASE1"
+if [ "$rc" -eq 0 ] && [ "$out" = "fire" ]; then
   pass "case12: --quiet prints 'fire' for a firing case"
 else
-  fail "case12: --quiet prints 'fire' for a firing case (got: '$out')"
+  fail "case12: --quiet prints 'fire' for a firing case (rc=$rc got: '$out')"
 fi
 
-out=$(run_cs_quiet "$CASE2")
-if [ "$out" = "no fire" ]; then
+run_cs_quiet "$CASE2"
+if [ "$rc" -eq 0 ] && [ "$out" = "no fire" ]; then
   pass "case12b: --quiet prints 'no fire' for a clean case"
 else
-  fail "case12b: --quiet prints 'no fire' for a clean case (got: '$out')"
+  fail "case12b: --quiet prints 'no fire' for a clean case (rc=$rc got: '$out')"
 fi
 
-# --- case 13: date-format equivalence (Z, fractional seconds, UTC offset) ---
-# All four represent the same instant; a T1 firing on one must fire on all,
-# with the identical docAgeDays in the output (a positive control: proves the
-# comparison isn't silently always-true or always-false regardless of format).
+# --- case 13: date-format equivalence (Z, +00:00, +0000, no offset) ---------
+# These four forms all name the SAME instant (unlike ".000Z" vs ".999Z",
+# which straddle a day boundary and are NOT equivalent under floor: that
+# was the bug in the old version of this case). Each form is checked with a
+# positive control: one issue 1 second after the instant (must count as
+# changed) and one issue 1 second before it (must not), so the equivalence
+# check can't pass merely because changedSinceDoc is trivially always 0 or
+# always both.
 
-same_instant_docage() {
-  ts="$1"
-  json=$(printf '{"doc":{"text":"nothing here\\n","updatedAt":"%s"},"issues":[],"options":{"now":"2026-09-24T00:00:00Z"}}' "$ts")
-  run_cs "$json" | jq -r '.counts.docAgeDays'
+check_instant_form() {
+  # check_instant_form <label> <doc_updatedAt>
+  label="$1"; ts="$2"
+  before_after_issues='[{"id":"EDGE-1","stateType":"started","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-08-31T23:59:59Z"},{"id":"EDGE-2","stateType":"started","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-09-01T00:00:01Z"}]'
+  json=$(printf '{"doc":{"text":"nothing here\\n","updatedAt":"%s"},"issues":%s,"options":{"now":"2026-09-24T00:00:00Z"}}' "$ts" "$before_after_issues")
+  run_cs "$json"
+  changed=$(jqget "$out" '.counts.changedSinceDoc')
+  docage=$(jqget "$out" '.counts.docAgeDays')
+  if ok_success && [ "$changed" = "1" ]; then
+    printf '%s %s\n' "$docage" "$changed"
+  else
+    printf 'FAILED rc=%s out=%s\n' "$rc" "$out"
+  fi
 }
-d1=$(same_instant_docage "2026-09-01T00:00:00Z")
-d2=$(same_instant_docage "2026-09-01T00:00:00.999Z")
-d3=$(same_instant_docage "2026-09-01T02:00:00+02:00")
-d4=$(same_instant_docage "2026-08-31T22:00:00-02:00")
-if [ "$d1" = "$d2" ] && [ "$d1" = "$d3" ] && [ "$d1" = "$d4" ]; then
-  pass "case13: Z, fractional-seconds, and +/- UTC offset forms of the same instant agree (docAgeDays=$d1)"
+r1=$(check_instant_form "Z" "2026-09-01T00:00:00Z")
+r2=$(check_instant_form "+00:00" "2026-09-01T00:00:00+00:00")
+r3=$(check_instant_form "+0000" "2026-09-01T00:00:00+0000")
+r4=$(check_instant_form "no-offset" "2026-09-01T00:00:00")
+r5=$(check_instant_form "date-only" "2026-09-01")
+d1=$(printf '%s' "$r1" | cut -d' ' -f1)
+d2=$(printf '%s' "$r2" | cut -d' ' -f1)
+d3=$(printf '%s' "$r3" | cut -d' ' -f1)
+d4=$(printf '%s' "$r4" | cut -d' ' -f1)
+d5=$(printf '%s' "$r5" | cut -d' ' -f1)
+any_failed=0
+printf '%s\n%s\n%s\n%s\n%s\n' "$r1" "$r2" "$r3" "$r4" "$r5" | grep -q FAILED && any_failed=1
+if [ "$any_failed" -eq 0 ] && [ "$d1" = "$d2" ] && [ "$d1" = "$d3" ] && [ "$d1" = "$d4" ] && [ "$d1" = "$d5" ]; then
+  pass "case13: Z, +00:00, +0000, no-offset, and date-only forms of the same instant agree (docAgeDays=$d1, each with a passing before/after positive control)"
 else
-  fail "case13: Z, fractional-seconds, and +/- UTC offset forms of the same instant agree (d1=$d1 d2=$d2 d3=$d3 d4=$d4)"
+  fail "case13: Z, +00:00, +0000, no-offset, and date-only forms of the same instant agree (r1=[$r1] r2=[$r2] r3=[$r3] r4=[$r4] r5=[$r5])"
 fi
 
-# Re-run the same equivalence under a DST-observing timezone: the comparisons
+# case13b: fractional-second ordering. A doc at ...00.100Z and an issue
+# updated at ...00.900Z are 0.8s apart; the issue must count as changed
+# (fractional seconds preserved in the epoch, not truncated) and, with no
+# status word anywhere, T1b must fire.
+read -r -d '' CASE13B <<'EOF' || true
+{
+  "doc": {"text": "See FRAC-1 for details.\n", "updatedAt": "2026-09-01T00:00:00.100Z"},
+  "issues": [{"id": "FRAC-1", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-01T00:00:00.900Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE13B"
+changed=$(jqget "$out" '.counts.changedSinceDoc')
+t1b=$(jqget "$out" '[.reasons[] | select(.rule=="T1b")] | length')
+if ok_success && [ "$changed" = "1" ] && [ "$t1b" = "1" ]; then
+  pass "case13b: fractional seconds are preserved, not truncated (0.8s apart still counts as changed, fires T1b)"
+else
+  fail "case13b: fractional seconds are preserved, not truncated (0.8s apart still counts as changed, fires T1b) (rc=$rc got: $out)"
+fi
+
+# Re-run the base equivalence under a DST-observing timezone, with a NO-OFFSET
+# timestamp specifically (a "Z" timestamp is timezone-independent by
+# construction and would test nothing about TZ-sensitivity): the comparisons
 # must all happen in jq against ISO instants, never against the shell's local
 # time, so TZ must not change the answer.
-tz_json='{"doc":{"text":"x","updatedAt":"2026-09-01T00:00:00Z"},"issues":[],"options":{"now":"2026-09-24T00:00:00Z"}}'
+tz_json='{"doc":{"text":"x","updatedAt":"2026-09-01T00:00:00"},"issues":[],"options":{"now":"2026-09-24T00:00:00Z"}}'
 e_budapest=$(printf '%s' "$tz_json" | TZ=Europe/Budapest "$CS" | jq -r '.counts.docAgeDays')
 e_default=$(printf '%s' "$tz_json" | "$CS" | jq -r '.counts.docAgeDays')
-if [ "$e_budapest" = "$e_default" ]; then
-  pass "case13b: TZ=Europe/Budapest (DST) does not change docAgeDays vs. the default timezone"
+if [ -n "$e_budapest" ] && [ "$e_budapest" = "$e_default" ]; then
+  pass "case13c: TZ=Europe/Budapest (DST) does not change docAgeDays for a no-offset timestamp vs. the default timezone"
 else
-  fail "case13b: TZ=Europe/Budapest (DST) does not change docAgeDays vs. the default timezone (budapest=$e_budapest default=$e_default)"
+  fail "case13c: TZ=Europe/Budapest (DST) does not change docAgeDays for a no-offset timestamp vs. the default timezone (budapest=$e_budapest default=$e_default)"
 fi
 
 # --- case 14: a positive control straddling doc.updatedAt exactly -----------
@@ -453,18 +705,18 @@ read -r -d '' CASE14 <<'EOF' || true
 {
   "doc": {"text": "nothing here\n", "updatedAt": "2026-09-20T12:00:00Z"},
   "issues": [
-    {"id": "EDGE-BEFORE", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-20T11:30:00Z"},
-    {"id": "EDGE-AFTER",  "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-20T12:30:00Z"}
+    {"id": "EDGE-1", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-20T11:30:00Z"},
+    {"id": "EDGE-2", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-20T12:30:00Z"}
   ],
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE14")
+run_cs "$CASE14"
 changed=$(jqget "$out" '.counts.changedSinceDoc')
-if [ "$changed" = "1" ]; then
+if ok_success && [ "$changed" = "1" ]; then
   pass "case14: an issue 30 minutes before doc.updatedAt is excluded, one 30 minutes after is included"
 else
-  fail "case14: an issue 30 minutes before doc.updatedAt is excluded, one 30 minutes after is included (got: $out)"
+  fail "case14: an issue 30 minutes before doc.updatedAt is excluded, one 30 minutes after is included (rc=$rc got: $out)"
 fi
 
 # --- case 15: jq missing from PATH exits 2 with a message -------------------
@@ -474,7 +726,7 @@ fi
 
 build_restricted_path_no_jq() {
   d=$(mktemp -d)
-  for b in cat mktemp rm bash; do
+  for b in cat mktemp rm bash grep; do
     p=$(command -v "$b" 2>/dev/null)
     [ -n "$p" ] && ln -sf "$p" "$d/$b"
   done
@@ -505,12 +757,161 @@ read -r -d '' CASE16 <<'EOF' || true
   "options": {"now": "2026-09-24T00:00:00Z"}
 }
 EOF
-out=$(run_cs "$CASE16")
+run_cs "$CASE16"
 t4issues=$(jqget "$out" '[.reasons[] | select(.rule=="T4") | .issue] | join(",")')
-if [ "$t4issues" = "MIX-2" ]; then
+if ok_success && [ "$t4issues" = "MIX-2" ]; then
   pass "case16: T4 exclusion of canceled issues is per-issue, not blanket"
 else
-  fail "case16: T4 exclusion of canceled issues is per-issue, not blanket (got: $out)"
+  fail "case16: T4 exclusion of canceled issues is per-issue, not blanket (rc=$rc got: $out)"
+fi
+
+# --- case 17: FIX F4 repros (clause-based attribution) -----------------------
+# Each of these is a repro named explicitly in the fix: a heuristic based on
+# "the segment between this ID and the next" would get at least one of them
+# wrong; clause-based attribution (split at , ; | . ) gets all four right.
+
+# 17a: "Done: TECH-1, planned: TECH-2": TECH-1 completed, TECH-2 unstarted
+# -> both correctly attributed via the comma-delimited clauses, no fire.
+read -r -d '' CASE17A <<'EOF' || true
+{
+  "doc": {"text": "Done: TECH-1, planned: TECH-2\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [
+    {"id": "TECH-1", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"},
+    {"id": "TECH-2", "stateType": "unstarted", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}
+  ],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17A"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case17a: 'Done: TECH-1, planned: TECH-2' with matching states does not fire"
+else
+  fail "case17a: 'Done: TECH-1, planned: TECH-2' with matching states does not fire (rc=$rc got: $out)"
+fi
+
+# 17a-flip: positive control for 17a. Same line, but the two issues' actual
+# states are SWAPPED (TECH-1 unstarted, TECH-2 completed), so the doc's
+# "Done: TECH-1" and "planned: TECH-2" are now both wrong. If clause
+# attribution silently failed (e.g. matched nothing, or attributed both
+# words to the same ID), this would go quiet like 17a instead of firing on
+# both, so this proves 17a's silence means "correctly matched", not
+# "matched nothing".
+read -r -d '' CASE17AFLIP <<'EOF' || true
+{
+  "doc": {"text": "Done: TECH-1, planned: TECH-2\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [
+    {"id": "TECH-1", "stateType": "unstarted", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"},
+    {"id": "TECH-2", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}
+  ],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17AFLIP"
+t1_ids_classes=$(jqget "$out" '[.reasons[] | select(.rule=="T1") | .issue + ":" + (.detail | capture("\\((?<c>[a-z]+)\\)").c)] | sort | join(",")')
+if ok_success && [ "$t1_ids_classes" = "TECH-1:completed,TECH-2:unstarted" ]; then
+  pass "case17a-flip: swapped states fire T1 on both TECH-1 (completed) and TECH-2 (unstarted), proving 17a's silence is a correct match, not no match"
+else
+  fail "case17a-flip: swapped states fire T1 on both TECH-1 (completed) and TECH-2 (unstarted), proving 17a's silence is a correct match, not no match (rc=$rc t1=$t1_ids_classes got: $out)"
+fi
+
+# 17b: "TECH-1 done; revisit later": TECH-1 completed -> no fire (the
+# semicolon-delimited second clause has no ID in it at all, and "later" is
+# no longer a recognized word anyway).
+read -r -d '' CASE17B <<'EOF' || true
+{
+  "doc": {"text": "TECH-1 done; revisit later\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-1", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17B"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case17b: 'TECH-1 done; revisit later' with TECH-1 completed does not fire"
+else
+  fail "case17b: 'TECH-1 done; revisit later' with TECH-1 completed does not fire (rc=$rc got: $out)"
+fi
+
+# 17b-flip: positive control for 17b. Same line, TECH-1's actual state is now
+# started, so "done" in TECH-1's own clause is a real mismatch: proves the
+# semicolon-delimited line still finds and classifies TECH-1 correctly, and
+# 17b's silence is not simply "the whole line matched nothing".
+read -r -d '' CASE17BFLIP <<'EOF' || true
+{
+  "doc": {"text": "TECH-1 done; revisit later\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-1", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17BFLIP"
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case17b-flip: TECH-1 actually started fires T1 (completed), proving 17b's silence is a correct match, not no match"
+else
+  fail "case17b-flip: TECH-1 actually started fires T1 (completed), proving 17b's silence is a correct match, not no match (rc=$rc got: $out)"
+fi
+
+# 17c: "TECH-1: build live preview": TECH-1 started -> no fire ("live" and
+# "building" were dropped as generic status words per FIX F4, so this clause
+# now carries no status evidence at all).
+read -r -d '' CASE17C <<'EOF' || true
+{
+  "doc": {"text": "TECH-1: build live preview\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-1", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17C"
+fire=$(jqget "$out" '.fire')
+if ok_success && [ "$fire" = "false" ]; then
+  pass "case17c: 'TECH-1: build live preview' with TECH-1 started does not fire"
+else
+  fail "case17c: 'TECH-1: build live preview' with TECH-1 started does not fire (rc=$rc got: $out)"
+fi
+
+# 17c-control: positive control for 17c. Same clause shape and colon
+# separator, but "shipped" (still a recognized completed word, unlike the
+# dropped "live"/"building") replaces "build live"; against a started issue
+# this must fire (completed). Proves 17c is silent because "live" and
+# "building" were dropped, not because colon-separated clauses match
+# nothing at all.
+read -r -d '' CASE17CCTRL <<'EOF' || true
+{
+  "doc": {"text": "TECH-1: shipped preview\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-1", "stateType": "started", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17CCTRL"
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1" ] && printf '%s' "$detail" | grep -qF "(completed)"; then
+  pass "case17c-control: 'TECH-1: shipped preview' vs a started issue fires T1 (completed), proving the clause still matches recognized words"
+else
+  fail "case17c-control: 'TECH-1: shipped preview' vs a started issue fires T1 (completed), proving the clause still matches recognized words (rc=$rc got: $out)"
+fi
+
+# 17d: a markdown table row, "| 3 | Extraction agent | planned (TECH-1317) |"
+# TECH-1317 completed -> T1 fires, classified planned (unstarted).
+read -r -d '' CASE17D <<'EOF' || true
+{
+  "doc": {"text": "| 3 | Extraction agent | planned (TECH-1317) |\n", "updatedAt": "2026-09-20T00:00:00Z"},
+  "issues": [{"id": "TECH-1317", "stateType": "completed", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-09-19T00:00:00Z"}],
+  "options": {"now": "2026-09-24T00:00:00Z"}
+}
+EOF
+run_cs "$CASE17D"
+rule=$(jqget "$out" '.reasons[0].rule // "none"')
+issue=$(jqget "$out" '.reasons[0].issue // "none"')
+detail=$(jqget "$out" '.reasons[0].detail // ""')
+if ok_success && [ "$rule" = "T1" ] && [ "$issue" = "TECH-1317" ] && printf '%s' "$detail" | grep -qF "(unstarted)"; then
+  pass "case17d: table row 'planned (TECH-1317)' vs completed fires T1, classified unstarted"
+else
+  fail "case17d: table row 'planned (TECH-1317)' vs completed fires T1, classified unstarted (rc=$rc got: $out)"
 fi
 
 # --- summary ------------------------------------------------------------------

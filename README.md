@@ -158,6 +158,13 @@ Both hook scripts are short, plain bash (each under 250 lines); read them before
 1. From the cloned repo, run `bash tests/run.sh`: it confirms both hooks run correctly on this machine (a throwaway `HOME`, touches nothing real).
 2. Start a new Claude Code session and run `/hooks`: `PostToolUse` and `Stop` should each show at least one configured hook.
 3. End to end: ask Claude to create a scratch Markdown file containing a bare `TODO` line, then finish its turn. When it finishes, the Stop hook injects the reminder, and Claude should come back proposing to resolve or justify that `TODO` (in the default propose mode). Delete the scratch file afterward.
+4. If you copied `bin/check-staleness` (the Linear/Jira/other-tracker path), confirm it runs standalone, no tracker or scheduler required:
+   ```bash
+   printf '%s' '{"doc":{"text":"- TECH-1: planned","updatedAt":"2026-09-01"},
+   "issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-01-01","updatedAt":"2026-09-10"}]}' \
+     | ~/.claude/bin/check-staleness
+   ```
+   It should print a JSON result with `"fire":true` (this sample doc calls a completed ticket "planned").
 
 ## Uninstall
 
@@ -217,17 +224,24 @@ A project's "current state" doc can live inside a project-management tool instea
 There's no file edit to hook here, so this path is separate from the three pieces above: opt-in, and checked manually or on a schedule, not automatically on every edit.
 
 - **Opt-in marker**: a PM doc is checked only when it carries a `hygiene: watch` marker (a plain visible line of text in its first 25 lines, since most PM editors strip HTML comments, unlike the `hygiene: ignore` marker above) or on explicit request.
-- **The trigger, `bin/check-staleness`** (bash and `jq`, no other dependency, no network call): four deterministic rules over the doc's own `updatedAt` and the linked issues' statuses and dates decide whether a pass is due.
+- **The trigger, `bin/check-staleness`** (bash and `jq`, no other dependency, no network call): four deterministic rules over the doc's own `updatedAt` and the linked issues' statuses and dates decide whether a pass is due. Input is validated strictly before any rule runs (exit 2, one stderr line per violation): `issues` must be present and an array (empty is valid; missing/null/false is not), every id must match `^[A-Za-z][A-Za-z0-9_]*-[0-9]+$`, every stateType must be one of the five below, and every timestamp is calendar-checked up front.
 
   | Rule | Fires when |
   |---|---|
-  | T1 (status mismatch) | An issue ID referenced in the doc text whose current status disagrees with the status wording on the same line as the ID. |
-  | T1b (weaker: silent drift) | A referenced issue updated after the doc, now started or completed, with no status word at all on any line that mentions it. |
+  | T1 (status mismatch) | An issue ID referenced in the doc text whose current status disagrees with the status wording in the same CLAUSE as the ID (a line splits into clauses at `,` `;` `\|` `.` and table cell borders). |
+  | T1b (weaker: silent drift) | A referenced issue updated after the doc, now started or completed, with no status word (not even an ambiguous one) at all on any line that mentions it. |
   | T2 (volume) | At least 5 (configurable) issues updated after the doc's own `updatedAt`. |
   | T3 (age) | The doc is older than 7 days (configurable) while the project is still active. |
   | T4 (unreferenced new work) | Issues created after the doc's `updatedAt` whose ID never appears in the doc text. |
 
+  Try it without any tracker or scheduler, piping a three-line sample straight in:
+  ```bash
+  printf '%s' '{"doc":{"text":"- TECH-1: planned","updatedAt":"2026-09-01"},
+  "issues":[{"id":"TECH-1","stateType":"completed","createdAt":"2026-01-01","updatedAt":"2026-09-10"}]}' \
+    | bin/check-staleness
+  ```
 - **Propose only, delivered as a comment**: there's no git undo for a Linear document or a Jira issue, so this path never edits the doc. The reconciliation runs in propose mode always, and the result goes out as a comment on the document or project, for a human to review and apply.
+- **Duplicate comments are skipped**: before posting, a fingerprint (12 hex characters of a SHA-256 of the doc's `updatedAt` plus the sorted, unique `rule:issue` pairs the trigger returned) is appended to the comment as `hygiene-fingerprint: <hash>`, and a run whose fingerprint already appears in an existing comment posts nothing new. Running the check on a schedule and posting a comment are two separate authorisations; neither implies the other.
 - **Scheduling is offered, never created unasked**: wiring the check to a clock or an event (a scheduled task, a webhook, an agent mention) is host-specific. The first manual run for a given project offers to set one up and waits for a yes.
 
 Recipes for turning a specific tool's API into `bin/check-staleness`'s input: [`references/linear.md`](skills/document-hygiene/references/linear.md), [`references/jira.md`](skills/document-hygiene/references/jira.md), and [`references/generic.md`](skills/document-hygiene/references/generic.md) for any other tool. `bin/check-staleness` itself is covered by the same regression suite as the two hooks (see Tests, below).
@@ -251,7 +265,7 @@ Recipes for turning a specific tool's API into `bin/check-staleness`'s input: [`
 - Recommended: `shasum` or `sha1sum` (macOS has shasum, most Linux distros have sha1sum). Without either, all projects share one state directory, still separated per session.
 - Optional: git 2.23 or newer, for the apply-mode recovery check and the `git restore` undo command. Without git every doc is handled in propose mode; project-root detection falls back to the current directory.
 - Running the tests additionally needs awk, mktemp, ln, tr, wc; the YAML check uses Ruby or Python 3 with PyYAML if present, otherwise it is skipped.
-- `bin/check-staleness` (the Linear/Jira/other-tracker path) needs only bash and `jq` 1.6 or newer built with regex support (Oniguruma; the default build for any jq 1.6+ package). No git, no network access, no other tool: it reads JSON on stdin and writes JSON to stdout. It checks its own jq version's regex support on startup and exits with a clear message instead of failing deep inside the filter if that's missing.
+- `bin/check-staleness` (the Linear/Jira/other-tracker path) needs only bash and `jq` 1.6 or newer built with regex support (Oniguruma; the default build for any jq 1.6+ package) AND regex match offsets counted in Unicode codepoints, not bytes; jq 1.7+ is confirmed good, and some older 1.6.x builds on some platforms may report byte offsets and get rejected. No git, no network access, no other tool: it reads JSON on stdin and writes JSON to stdout. It checks its own jq build's regex support, lookaround support, and match-offset behavior on startup and exits with a clear message instead of failing deep inside the filter (or silently misreading a line with a non-ASCII character) if any of those is missing.
 
 ## Tests
 
