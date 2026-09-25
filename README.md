@@ -12,6 +12,7 @@ An AI agent editing a long document patches only the paragraph in front of it, s
 
 - **A reminder at the end of a turn**: the Stop hook checks, when a turn finishes, whether the session has made 5+ edits to a Markdown doc or left a scar marker (`corrected`, bare `TODO`, etc.) in one of them (docs that opted out don't count). Detection is not real time: nothing happens mid-turn, only at the end, when the Stop event fires.
 - **A disciplined reconciliation procedure**: on that reminder, Claude re-reads the whole document, re-verifies every claim against current evidence, fixes contradictions on both sides, and strips changelog narration.
+- **Living docs inside Linear, Jira and other trackers** (opt-in): a project page that lives in a tracker drifts too, when tickets move and the page doesn't. A small checker compares the page against its issues (status words that no longer match, new issues the page never mentions, many changes since the last edit, an old page in an active project) and Claude proposes the fixes; it never edits the tracker. See [Living docs inside Linear, Jira and other trackers](#living-docs-inside-linear-jira-and-other-trackers).
 - **Safe defaults**: nothing is edited without your say-so unless you deliberately switch modes, and even then, only inside a git safety net.
 
 ### Safety, in six lines
